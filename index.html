@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Mixed FR/EN Book Reader</title>
+<!--
+  Mixed-language book reader — the third app in the family.
+
+    index.html              FR/EN parallel text: every block holds a French
+                            paragraph AND its English translation, shown one
+                            above the other and read in both.
+    index_monolingual.html  French only, read straight through.
+    index_mixed.html (this) One text, code-switched. The source already mixes
+                            the two languages inside the same paragraph,
+                            sentence, dialogue line and table row, and there
+                            are no translations to pair up. The page shows
+                            each paragraph exactly as written, one per reading
+                            block, and reads it aloud switching voice and
+                            speed mid-paragraph as the language changes.
+
+  It makes NO language decisions of its own. build_books_mixed.js has already
+  broken every block into segments and tagged each one "fr" or "en"; each
+  segment arrives as a <span class="ttsSeg" data-seg="i" data-lang="…"> in the
+  block's HTML plus a matching entry in the block's `segs` array. This page
+  walks that array: segs[i].text goes to the speech engine with the voice and
+  words-per-minute configured for segs[i].lang, and the span with the same
+  data-seg is what gets highlighted. So anything mis-spoken is a build-time
+  tagging question — rebuild with --report and check the audit file.
+
+  Needs to be served over https (GitHub Pages) or from localhost: fetch and
+  WebCrypto are both blocked for pages opened as bare local files.
+-->
+<style>
+  :root{
+    --bg:#0c0d10; --panel:#15171d; --line:#262a33; --dim:#8b8f99; --text:#f0ede6;
+    --accent:#e5342b; --sbg:#101216; --stext:#ecebe6; --frTint:#8ab4f8;
+  }
+  :root[data-theme="light"]{
+    --bg:#f4f3f0; --panel:#ffffff; --line:#dedcd6; --dim:#767a82; --text:#17181c;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{position:fixed;inset:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;overflow:hidden}
+  button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+  .wrap{height:100%;display:flex;flex-direction:column}
+
+  #setup{padding:18px;display:flex;flex-direction:column;gap:12px;height:100%;overflow:auto}
+  h1{font-weight:700;font-size:24px;letter-spacing:-.3px}
+  h1 .dot{color:var(--accent)}
+  .sub{color:var(--dim);font-size:13px;line-height:1.5;max-width:56ch}
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field label{font-size:10.5px;letter-spacing:.6px;color:var(--dim);text-transform:uppercase}
+  .field label b{color:var(--text)}
+  .seg{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .seg button{flex:1;padding:11px 4px;font-size:12.5px;color:var(--dim);font-weight:500}
+  .seg button.sel{background:var(--accent);color:#fff;font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .row{display:flex;gap:10px}
+  select{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:11px;font-size:13px;font-family:inherit}
+  select:focus{outline:none;border-color:var(--accent)}
+  select:disabled{opacity:.5}
+  input[type=text],input[type=password]{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:11px;font-size:13px;font-family:inherit}
+  input[type=text]:focus,input[type=password]:focus{outline:none;border-color:var(--accent)}
+  .remember{display:flex;flex-direction:row;align-items:center;gap:7px;font-size:11px;color:var(--dim);text-transform:none;letter-spacing:0;margin-top:4px}
+  .remember input{width:auto;height:auto;accent-color:var(--accent)}
+  .btn{background:var(--accent);color:#fff;font-weight:600;font-size:16px;padding:15px 20px;border-radius:11px;flex:1}
+  .btn:disabled{opacity:.5}
+  .btn:active{transform:translateY(1px)}
+  .hint{color:var(--dim);font-size:11.5px;line-height:1.4}
+  .err{color:var(--accent);font-size:12.5px;min-height:15px}
+  hr.sep{border:none;border-top:1px solid var(--line);margin:4px 0}
+  .sectionLabel{font-size:11px;font-weight:700;letter-spacing:.5px;color:var(--dim);text-transform:uppercase;margin-top:4px}
+
+  /* typable book combobox */
+  .combo{position:relative}
+  .combo input{padding-right:34px}
+  .combo-clear{position:absolute;top:0;right:0;bottom:0;width:34px;display:none;align-items:center;justify-content:center;
+    color:var(--dim);font-size:16px;cursor:pointer}
+  .combo-clear.show{display:flex}
+  .combo-clear:active{color:var(--text)}
+  .combo-list{position:absolute;left:0;right:0;top:calc(100% + 4px);max-height:260px;overflow-y:auto;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;z-index:20;
+    box-shadow:0 12px 30px rgba(0,0,0,.35);display:none}
+  .combo-list.show{display:block}
+  .combo-list .opt{padding:11px 13px;font-size:13.5px;border-bottom:1px solid var(--line);cursor:pointer}
+  .combo-list .opt:last-child{border-bottom:none}
+  .combo-list .opt:hover,.combo-list .opt.hi{background:var(--bg)}
+  .combo-list .empty{padding:11px 13px;font-size:12.5px;color:var(--dim)}
+
+  /* wpm steppers (used both in setup and reader) */
+  .wpmRow{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 8px}
+  .wpmRow .lbl{font-size:11px;color:var(--dim);font-weight:600;min-width:26px}
+  .wpmRow button{width:32px;height:32px;border-radius:8px;background:var(--bg);border:1px solid var(--line);font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .wpmRow button:active{transform:translateY(1px)}
+  .wpmRow .val{flex:1;text-align:center;font-size:13px;font-variant-numeric:tabular-nums;font-weight:600}
+
+  #reader{display:none}
+  #reader.on{display:flex;flex-direction:column;height:100%}
+  .stage{flex:1 1 auto;min-height:0;position:relative;overflow:hidden;background:var(--sbg);color:var(--stext);transition:background .2s,color .2s}
+  .topbar{position:absolute;top:8px;left:0;right:0;display:flex;flex-direction:column;gap:6px;padding:0 54px 0 10px;z-index:5;transition:opacity .2s}
+  .topbar-row{display:flex;justify-content:space-between;align-items:center;gap:6px}
+  .pill{font-size:12px;color:var(--dim);background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:8px;padding:6px 11px;white-space:nowrap}
+  /* A hardware/lock-screen control (e.g. a headphone button) shouldn't make
+     any on-screen button visibly light up — belt-and-suspenders alongside
+     the JS blurActive() calls in case a browser still paints a focus ring. */
+  .pill:focus,.langBtn:focus{outline:none}
+  .pill.icon{padding:6px 9px;font-size:13px;line-height:1}
+  .stage[data-light="1"] .pill{background:rgba(255,255,255,.65);color:#333;border-color:#ccc}
+  .chapterNav{display:flex;align-items:center;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+  .topbar-right{display:flex;align-items:center;gap:6px;flex:0 0 auto}
+  .hideToggle{position:absolute;top:8px;right:10px;z-index:6}
+  .stage[data-light="1"] .hideToggle{background:rgba(255,255,255,.65);color:#333;border-color:#ccc}
+  .fontRow{justify-content:center;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .fontRow .pill{flex:0 0 auto}
+
+  .chapterToast{position:absolute;top:64px;left:50%;transform:translateX(-50%);max-width:88%;
+    background:rgba(0,0,0,.75);color:#fff;font-size:12.5px;line-height:1.4;text-align:center;
+    padding:9px 14px;border-radius:10px;z-index:8;opacity:0;pointer-events:none;transition:opacity .25s}
+  .chapterToast.show{opacity:1}
+  .stage[data-light="1"] .chapterToast{background:rgba(255,255,255,.88);color:#222;border:1px solid #ccc}
+
+  .textDisplay{position:absolute;inset:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    padding:70px 6% 26px;z-index:2;display:flex;align-items:center;touch-action:pan-y;
+    -webkit-user-select:none;user-select:none}
+  .textDisplay .inner{width:100%;margin:auto}
+
+  /* The reading block. There is exactly one per screen — the whole paragraph,
+     dialogue, heading or table as written in the source, with both languages
+     left interleaved inside it. */
+  .mixBlock{font-family:"Linux Libertine","Libertinus Serif",Georgia,serif;
+    font-size:calc(clamp(19px,4.6vw,32px) * var(--mainScale,1));line-height:1.55;text-align:left;
+    font-style:normal}
+  /* In-content sub-headings (source ###–######); levels get progressively
+     less shouty, since level 4+ is used for short call-outs ("Attention !"). */
+  .mixHeading{font-weight:700}
+  .mixHeading.lvl3{font-size:1.05em}
+  .mixHeading.lvl4,.mixHeading.lvl5,.mixHeading.lvl6{font-size:.85em;text-transform:uppercase;letter-spacing:.4px;opacity:.8}
+  /* Source blockquotes. In the parallel-text app a blockquote meant "the
+     English translation of the block above"; here it means nothing more than
+     "this was indented in the source", so it's shown indented and nothing
+     else is assumed about it. */
+  .mixQuote{border-left:3px solid currentColor;padding-left:.7em;opacity:.92}
+  .liMark{opacity:.55}
+  /* Pipe tables (vocab lists, conjugation charts, exam grids). Cells are
+     individually language-tagged, so a row can read left-to-right in
+     French, then English. */
+  .mixTableWrap{overflow-x:auto}
+  .mixTable{width:100%;border-collapse:collapse;font-size:.8em}
+  .mixTable th,.mixTable td{border:1px solid currentColor;padding:7px 11px;text-align:left;vertical-align:top}
+  .mixTable th{font-weight:700}
+  /* Cells the build step marked display-only — the "Pronunciation Guide"
+     respellings like "(bohn-ZHOOR)", which are noise in any voice. Shown,
+     never spoken. */
+  .mixTable .noSpeak{opacity:.6;font-style:italic}
+
+  /* One span per tagged segment, pre-baked by the build step. Invisible by
+     default; only the ONE segment being spoken is styled, and only via the
+     highlight-mode button — background or underline, never a border or
+     padding change, so nothing reflows mid-sentence, and grayscale only so
+     it stays legible on e-ink. */
+  .ttsSeg{}
+  .stage[data-hl="underline"] .ttsSeg.speaking{
+    text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:4px}
+  .stage[data-hl="highlight"] .ttsSeg.speaking{background:#d8d8d8;border-radius:3px;color:#000}
+  /* Optional colour cue for which language each fragment is in. Off by
+     default — the point of this app is to show the text as written — but
+     it makes the code-switching visible at a glance when learning. */
+  .stage[data-tint="on"] .ttsSeg[data-lang="fr"]{color:var(--frTint)}
+
+  .controls{display:flex;flex-direction:column;flex:0 0 auto;transition:opacity .2s,max-height .2s;overflow:hidden}
+  .controls.hidden{max-height:0;opacity:0;pointer-events:none}
+  .readout{flex:0 0 auto;display:flex;justify-content:space-between;padding:9px 18px;color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;border-top:1px solid var(--line);background:var(--panel)}
+  .readout b{color:var(--text);font-weight:600}
+  .langToggleRow{flex:0 0 auto;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 14px 0;background:var(--panel)}
+  .langBtn{padding:11px;border-radius:10px;border:1px solid var(--line);background:var(--bg);font-weight:700;font-size:13px;color:var(--dim);letter-spacing:.4px}
+  .langBtn.sel{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .langBtn:active{transform:translateY(1px)}
+  .wpmDualRow{flex:0 0 auto;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 14px 4px;background:var(--panel)}
+  .playRow{flex:0 0 auto;display:flex;justify-content:center;padding:6px 14px 4px;background:var(--panel)}
+  .play{width:64px;height:64px;border-radius:50%;background:var(--accent);color:#fff;font-size:24px;display:flex;align-items:center;justify-content:center}
+  .play:active{transform:scale(.96)}
+  .navrow{flex:0 0 auto;display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:6px 14px 14px;background:var(--panel)}
+  .navrow button{padding:9px 4px;border-radius:9px;background:var(--bg);border:1px solid var(--line);color:var(--dim);
+    font-size:16px;display:flex;flex-direction:column;align-items:center;gap:2px}
+  .navrow button small{font-size:9.5px;letter-spacing:.3px}
+  .navrow button:active{transform:translateY(1px)}
+
+  .cpanel{position:absolute;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--line);
+    padding:14px;z-index:9;transform:translateY(110%);transition:transform .22s;display:flex;flex-direction:column;gap:10px}
+  .cpanel.on{transform:translateY(0)}
+  .cpanel h3{font-size:11px;letter-spacing:.6px;color:var(--dim);text-transform:uppercase;font-weight:700}
+  .presets{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+  .preset{padding:9px 4px;border-radius:8px;border:1px solid var(--line);background:var(--bg);font-size:11px;color:var(--dim)}
+  .pickers{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .picker{display:flex;flex-direction:column;gap:5px;font-size:10.5px;letter-spacing:.5px;color:var(--dim);text-transform:uppercase}
+  .picker input{width:100%;height:38px;border:1px solid var(--line);border-radius:9px;background:var(--bg);padding:2px}
+  .cpanel .done{padding:12px;border-radius:10px;background:var(--accent);color:#fff;font-weight:600;font-size:14px}
+
+  @media (max-width:420px){
+    .topbar{padding:0 50px 0 8px}
+    .topbar-row{gap:4px}
+    .pill{padding:5px 9px;font-size:11px}
+    .fontRow{gap:4px}
+    .chapterToast{top:40px;font-size:11px;padding:7px 11px}
+    .textDisplay{padding:52px 6% 16px}
+    .hideToggle{top:4px;right:6px;padding:5px 8px;font-size:11px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <section id="setup">
+    <h1>Mixed Reader<span class="dot">.</span></h1>
+    <p class="sub">For books that switch between French and English inside the same
+      paragraph. Each paragraph is shown exactly as written, one at a time, and read
+      aloud with the French parts in a French voice and the English parts in an English
+      voice — each with its own speed.</p>
+
+    <div class="field">
+      <label>Book</label>
+      <div class="combo">
+        <input type="text" id="bookInput" placeholder="Type to search a book…" autocomplete="off">
+        <button type="button" class="combo-clear" id="bookClear" title="Clear book selection">&times;</button>
+        <div class="combo-list" id="bookList"></div>
+      </div>
+    </div>
+    <div class="field"><label>Chapter</label><select id="chapterSelect" disabled></select></div>
+    <div class="field" id="passField" style="display:none"><label>Password</label>
+      <input type="password" id="bookPass" placeholder="Passphrase for your books" autocomplete="off">
+      <label class="remember"><input type="checkbox" id="bookRemember"> Remember on this device</label>
+    </div>
+    <div class="row"><button class="btn" id="loadChapterBtn" disabled>Load chapter &amp; read</button></div>
+    <p class="err" id="err"></p>
+    <p class="hint" id="libNote" style="margin-top:-6px"></p>
+
+    <hr class="sep">
+    <div class="field"><label>App theme</label>
+      <div class="seg" id="themeSeg"><button data-v="auto" class="sel">Auto</button><button data-v="light">Light</button><button data-v="dark">Dark</button></div></div>
+
+    <p class="sectionLabel">Text‑to‑speech</p>
+    <div class="field"><label>TTS voice — French</label>
+      <select id="voiceSelectFR"><option value="">Automatic</option></select></div>
+    <div class="field"><label>TTS voice — English</label>
+      <select id="voiceSelectEN"><option value="">Automatic</option></select></div>
+
+    <div class="grid2">
+      <div class="field"><label>Speed — French</label>
+        <div class="wpmRow"><button data-wpm="fr" data-d="-10">&minus;</button><span class="val" id="wpmValFR_setup">150</span><span class="lbl">wpm</span><button data-wpm="fr" data-d="10">+</button></div></div>
+      <div class="field"><label>Speed — English</label>
+        <div class="wpmRow"><button data-wpm="en" data-d="-10">&minus;</button><span class="val" id="wpmValEN_setup">250</span><span class="lbl">wpm</span><button data-wpm="en" data-d="10">+</button></div></div>
+    </div>
+
+    <div class="field"><label>Voice selection mode — French <span style="text-transform:none;color:var(--dim)">(try these if the wrong voice is used)</span></label>
+      <select id="voiceMethodFR">
+        <option value="auto">Auto (recommended – latest method)</option>
+        <option value="m1" selected>Automatic 1 – Force language code</option>
+        <option value="m2">Automatic 2 – Match global default voice</option>
+        <option value="m3">Automatic 3 – Match per-language default voice</option>
+      </select>
+    </div>
+    <div class="field"><label>Voice selection mode — English <span style="text-transform:none;color:var(--dim)">(try these if the wrong voice is used)</span></label>
+      <select id="voiceMethodEN">
+        <option value="auto">Auto (recommended – latest method)</option>
+        <option value="m1" selected>Automatic 1 – Force language code</option>
+        <option value="m2">Automatic 2 – Match global default voice</option>
+        <option value="m3">Automatic 3 – Match per-language default voice</option>
+      </select>
+    </div>
+
+    <div class="field"><label>Pause when the language changes</label>
+      <div class="wpmRow"><button data-gap="-50">&minus;</button><span class="val" id="gapVal">180</span><span class="lbl">ms</span><button data-gap="50">+</button></div>
+      <p class="hint">A short silence inserted wherever a paragraph switches between
+        French and English, so the two don't run together. Set it to 0 for no gap.</p>
+    </div>
+  </section>
+
+  <section id="reader">
+    <div class="stage" id="stage">
+      <div class="topbar" id="topbar">
+        <div class="topbar-row">
+          <button class="pill" id="closeBtn">✕ Close</button>
+          <div class="chapterNav" id="chapterNav">
+            <button class="pill" id="prevChapterBtn" title="Previous chapter" style="display:none">‹ Prev</button>
+            <button class="pill" id="nextChapterBtn" title="Next chapter" style="display:none">Next ›</button>
+          </div>
+          <div class="topbar-right">
+            <button class="pill icon" id="infoBtn" title="Current chapter &amp; book">ⓘ</button>
+            <button class="pill icon" id="colorBtn" title="Colours">🎨</button>
+          </div>
+        </div>
+        <div class="topbar-row fontRow" id="fontRow">
+          <button class="pill" data-act="mainDown" title="Decrease text size">T&#8722;</button>
+          <button class="pill" data-act="mainUp" title="Increase text size">T&#43;</button>
+          <button class="pill" data-act="fontReset" title="Reset text size">&#8635;</button>
+          <button class="pill" id="hlBtn" title="Cycle how the part being read is highlighted (off / underline / gray)">Highlight: Off</button>
+          <button class="pill" id="repeatBtn" title="Repeat each block 0, 1, or 2 extra times">Repeat: Off</button>
+          <button class="pill" id="tintBtn" title="Colour the French fragments so the language switching is visible">Tint: Off</button>
+        </div>
+      </div>
+      <button class="pill icon hideToggle" id="hideBtn" title="Hide all controls">⤢</button>
+      <div class="chapterToast" id="chapterToast"></div>
+      <div class="textDisplay" id="textDisplay"><div class="inner" id="textInner"></div></div>
+      <div class="cpanel" id="cpanel">
+        <h3>Colours</h3>
+        <div class="presets" id="presets">
+          <button class="preset" data-bg="#ffffff" data-text="#000000">B / W</button>
+          <button class="preset" data-bg="#101216" data-text="#ecebe6">Spritz</button>
+          <button class="preset" data-bg="#f3e9d2" data-text="#43392b">Sepia</button>
+          <button class="preset" data-bg="#000000" data-text="#c9c9c9">Night</button>
+        </div>
+        <div class="pickers">
+          <label class="picker">Background<input type="color" id="bgPick" value="#101216"></label>
+          <label class="picker">Text<input type="color" id="textPick" value="#ecebe6"></label>
+        </div>
+        <button class="done" id="cdone">Done</button>
+      </div>
+    </div>
+    <div class="controls" id="controls">
+      <div class="readout">
+        <span><b id="pos">0</b> / <span id="total">0</span></span>
+        <span id="mixNote"></span>
+        <span><b id="wpmFRr">150</b> fr</span>
+        <span><b id="wpmENr">250</b> en</span>
+      </div>
+      <div class="langToggleRow" id="langToggleRow">
+        <button class="langBtn sel" id="langBtnFR" data-lang="fr">Read French</button>
+        <button class="langBtn sel" id="langBtnEN" data-lang="en">Read English</button>
+      </div>
+      <div class="wpmDualRow">
+        <div class="wpmRow"><button data-wpm="fr" data-d="-10">&minus;</button><span class="val" id="wpmValFR">150</span><span class="lbl">FR</span><button data-wpm="fr" data-d="10">+</button></div>
+        <div class="wpmRow"><button data-wpm="en" data-d="-10">&minus;</button><span class="val" id="wpmValEN">250</span><span class="lbl">EN</span><button data-wpm="en" data-d="10">+</button></div>
+      </div>
+      <div class="playRow"><button class="play" data-act="toggle" id="playBtn">&#9658;</button></div>
+      <div class="navrow">
+        <button data-act="prevBlock">&#9198;<small>prev</small></button>
+        <button data-act="replay">&#8634;<small>replay</small></button>
+        <button data-act="nextBlock">&#9197;<small>next</small></button>
+        <button data-act="reset">&#8635;<small>reset</small></button>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+(function(){
+  "use strict";
+  var $=function(id){return document.getElementById(id);};
+
+  /* ========== library (lazy-loaded + decrypted from ./data-mixed) ==========
+     manifest.json holds book -> chapter TITLES plus key-derivation params
+     (salt/iterations). Each book's blocks live in one AES-GCM-encrypted .enc
+     file, fetched only when you open a chapter, then decrypted in-browser
+     with a key derived from your passphrase and cached.
+     The folder is "data-mixed", not "data", so this app's library can sit
+     next to the parallel-text and French-only apps' libraries in one repo
+     without either build step wiping the other. */
+  var DATA_DIR='data-mixed';
+  var MANIFEST=null, bookCache={}, CRYPTO_KEY=null, keyPass=null;
+  var selectedBook=null; // manifest book entry currently chosen in the combobox
+
+  var bookInput=$('bookInput'), bookList=$('bookList'), chapSel=$('chapterSelect'),
+      bookClear=$('bookClear'), passInput=$('bookPass'), rememberBox=$('bookRemember'), loadBtn=$('loadChapterBtn');
+
+  function updateClearBtn(){ bookClear.classList.toggle('show', !!bookInput.value); }
+  function renderBookList(filter){
+    bookList.innerHTML='';
+    if(!MANIFEST){ bookList.classList.remove('show'); return; }
+    var f=(filter||'').trim().toLowerCase();
+    var matches = MANIFEST.books.filter(function(b){ return !f || b.title.toLowerCase().indexOf(f)>=0; });
+    if(!matches.length){
+      var e=document.createElement('div'); e.className='empty'; e.textContent='No matching books.';
+      bookList.appendChild(e);
+    } else {
+      matches.forEach(function(b){
+        var o=document.createElement('div'); o.className='opt'; o.textContent=b.title;
+        o.addEventListener('click',function(){ chooseBook(b); });
+        bookList.appendChild(o);
+      });
+    }
+    bookList.classList.add('show');
+  }
+  function chooseBook(b){
+    selectedBook=b; bookInput.value=b.title; bookList.classList.remove('show');
+    fillChapters(); updateLoadEnabled(); updateClearBtn();
+  }
+  function clearBook(){
+    selectedBook=null; bookInput.value='';
+    fillChapters(); updateLoadEnabled(); updateClearBtn();
+    bookList.classList.remove('show');
+    bookInput.focus();
+  }
+  bookClear.addEventListener('click', clearBook);
+  function fillChapters(){
+    chapSel.innerHTML='';
+    if(!selectedBook){ chapSel.disabled=true; return; }
+    selectedBook.chapters.forEach(function(t,i){ var o=document.createElement('option'); o.value=i; o.textContent=t; chapSel.appendChild(o); });
+    chapSel.disabled=false;
+  }
+  function updateLoadEnabled(){ loadBtn.disabled = !selectedBook; }
+  bookInput.addEventListener('input',function(){
+    if(selectedBook && bookInput.value!==selectedBook.title) selectedBook=null;
+    updateLoadEnabled(); fillChapters(); updateClearBtn();
+    renderBookList(bookInput.value);
+  });
+  bookInput.addEventListener('focus',function(){ renderBookList(bookInput.value); });
+  document.addEventListener('click',function(e){
+    if(!e.target.closest('.combo')) bookList.classList.remove('show');
+  });
+
+  // remember the passphrase on this device (personal use); harmless if blocked
+  try{ var saved=localStorage.getItem('bookPass'); if(saved){ passInput.value=saved; rememberBox.checked=true; } }catch(e){}
+
+  function b64ToBuf(b64){ var s=atob(b64), a=new Uint8Array(s.length); for(var i=0;i<s.length;i++)a[i]=s.charCodeAt(i); return a; }
+  function deriveKey(pass,c){
+    return crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey'])
+      .then(function(base){ return crypto.subtle.deriveKey({name:'PBKDF2', salt:b64ToBuf(c.salt), iterations:c.iter, hash:c.hash||'SHA-256'}, base, {name:'AES-GCM', length:256}, false, ['decrypt']); });
+  }
+  function decryptBook(obj,key){
+    return crypto.subtle.decrypt({name:'AES-GCM', iv:b64ToBuf(obj.iv)}, key, b64ToBuf(obj.ct))
+      .then(function(pt){ return JSON.parse(new TextDecoder().decode(pt)); });
+  }
+  function ensureKey(){
+    if(!MANIFEST.crypto) return Promise.resolve(null);
+    var pass=passInput.value;
+    if(!pass) return Promise.reject({noPass:true});
+    if(CRYPTO_KEY && keyPass===pass) return Promise.resolve(CRYPTO_KEY);
+    return deriveKey(pass,MANIFEST.crypto).then(function(k){ CRYPTO_KEY=k; keyPass=pass; return k; });
+  }
+  function rememberPass(){ try{ if(rememberBox.checked) localStorage.setItem('bookPass',passInput.value); else localStorage.removeItem('bookPass'); }catch(e){} }
+
+  // Chapter navigation state (once a chapter has been opened).
+  var currentBook=null, currentChapterIdx=-1;
+  function updateChapterNavUI(){
+    var has=!!currentBook;
+    $('prevChapterBtn').style.display = has ? '' : 'none';
+    $('nextChapterBtn').style.display = has ? '' : 'none';
+  }
+
+  function openChapterContent(b,ci,content){
+    var c=content.chapters[ci];
+    if(!c){ $('err').textContent='Chapter not found.'; return; }
+    currentBook=b; currentChapterIdx=ci; updateChapterNavUI();
+    $('err').textContent='';
+    loadBlocks(c.blocks);
+    updateMediaSessionMetadata();
+  }
+  function loadChapterByIndex(b,ci){
+    if(!b)return;
+    if(bookCache[b.id]){ openChapterContent(b,ci,bookCache[b.id]); return; }
+    $('err').textContent='Loading chapter\u2026';
+    ensureKey()
+      .then(function(key){ return fetch(b.file).then(function(r){ if(!r.ok)throw {load:true}; return r.json(); })
+        .then(function(raw){ return MANIFEST.crypto ? decryptBook(raw,key) : raw; }); })
+      .then(function(content){ bookCache[b.id]=content; rememberPass(); openChapterContent(b,ci,content); })
+      .catch(function(e){
+        if(e&&e.noPass){ $('err').textContent='Enter your books password above, then tap Load.'; }
+        else if(e&&e.load){ $('err').textContent='Could not load that book file ('+b.file+').'; }
+        else { CRYPTO_KEY=null; keyPass=null; $('err').textContent='Wrong password, or the book couldn\u2019t be decrypted.'; }
+      });
+  }
+
+  fetch(DATA_DIR+'/manifest.json').then(function(r){ if(!r.ok)throw 0; return r.json(); })
+    .then(function(m){ MANIFEST=m; $('passField').style.display = m.crypto ? '' : 'none'; })
+    .catch(function(){ $('libNote').textContent='Library couldn\u2019t load here — it needs to be served over https (e.g. GitHub Pages or localhost), with a '+DATA_DIR+'/ folder built by build_books_mixed.js.';
+      bookInput.disabled=true; chapSel.disabled=true; passInput.disabled=true; loadBtn.disabled=true; });
+
+  loadBtn.addEventListener('click',function(){
+    if(!selectedBook)return; var ci=parseInt(chapSel.value,10)||0;
+    loadChapterByIndex(selectedBook,ci);
+  });
+  $('prevChapterBtn').addEventListener('click',function(){
+    if(!currentBook)return; var n=currentBook.chapters.length; if(!n)return;
+    loadChapterByIndex(currentBook,(currentChapterIdx-1+n)%n);
+  });
+  $('nextChapterBtn').addEventListener('click',function(){
+    if(!currentBook)return; var n=currentBook.chapters.length; if(!n)return;
+    loadChapterByIndex(currentBook,(currentChapterIdx+1)%n);
+  });
+  $('closeBtn').onclick=function(){ stop(); $('reader').classList.remove('on'); $('reader').style.display='none'; $('setup').style.display='flex'; };
+
+  /* ========== voices ==========
+     Two independent voice slots, one per language. Unlike the other two
+     apps, both are in play within a single paragraph here, so getting each
+     one right matters more: a wrong French voice doesn't just sound off, it
+     makes half of every mixed sentence unintelligible. */
+  var voices=[];
+  function loadVoices(){ try{ voices=window.speechSynthesis.getVoices()||[]; }catch(e){ voices=[]; } fillVoiceSelects(); }
+  function fillVoiceSelects(){ fillVoiceSelect('voiceSelectFR','fr'); fillVoiceSelect('voiceSelectEN','en'); }
+  function fillVoiceSelect(id,two){
+    var sel=$(id); if(!sel)return; var prev=sel.value;
+    var list=voices.filter(function(v){ return v.lang && v.lang.slice(0,2).toLowerCase()===two; });
+    list.sort(function(a,b){ return voiceScore(b)-voiceScore(a); });
+    sel.innerHTML='<option value="">Automatic</option>';
+    list.forEach(function(v){ var o=document.createElement('option'); o.value=v.voiceURI;
+      o.textContent=v.name+' ('+v.lang+')'+(v.default?' – default':''); sel.appendChild(o); });
+    if(prev){ sel.value=prev; }
+  }
+  function defaultVoice(){ return voices.filter(function(v){return v.default;})[0]||null; }
+  function voiceScore(v){ var n=(v.name||'').toLowerCase(), s=0;
+    if(v.default)s+=6;
+    if(/enhanced|premium|natural|siri/.test(n))s+=4;
+    if(/compact|eloquence|espeak/.test(n))s-=5;
+    if(v.localService)s+=1;
+    return s; }
+  // Three interchangeable voice-selection strategies per language —
+  // user-selectable so you can compare them on your own device rather than
+  // guessing which one Safari/Android will honor.
+  function chooseVoiceM1(t){ return {forcedLang: t==='fr'?'fr-FR':'en-US'}; }
+  function chooseVoiceM2(t){
+    var def=defaultVoice();
+    if(def&&def.lang&&def.lang.slice(0,2).toLowerCase()===t) return null;
+    var m=voices.filter(function(v){return v.lang&&v.lang.slice(0,2).toLowerCase()===t;});
+    if(!m.length) return null;
+    m.sort(function(a,b){return voiceScore(b)-voiceScore(a);});
+    return m[0];
+  }
+  function chooseVoiceM3(t){
+    var m=voices.filter(function(v){return v.lang&&v.lang.slice(0,2).toLowerCase()===t;});
+    if(!m.length) return null;
+    var langDefault=m.filter(function(v){return v.default;});
+    if(langDefault.length) return langDefault[0];
+    var def=defaultVoice();
+    if(def&&def.lang&&def.lang.slice(0,2).toLowerCase()===t) return null;
+    m.sort(function(a,b){return voiceScore(b)-voiceScore(a);});
+    return m[0];
+  }
+  var voiceMethod={fr:'m1',en:'m1'};
+  function resolveVoiceMethod(t){ var m=voiceMethod[t]; return m==='auto'?'m3':m; }
+  function chooseVoice(t){
+    var method=resolveVoiceMethod(t);
+    if(method==='m1') return chooseVoiceM1(t);
+    if(method==='m2') return chooseVoiceM2(t);
+    return chooseVoiceM3(t);
+  }
+  $('voiceMethodFR').addEventListener('change',function(){ voiceMethod.fr=this.value; });
+  $('voiceMethodEN').addEventListener('change',function(){ voiceMethod.en=this.value; });
+
+  var hasTTS=('speechSynthesis' in window);
+  if(hasTTS){ loadVoices(); try{ window.speechSynthesis.onvoiceschanged=loadVoices; }catch(e){} }
+  else { $('err').textContent='Voice not available in this browser.'; }
+
+  function applyVoiceSettings(u,t){
+    var chosenURI = $(t==='fr' ? 'voiceSelectFR' : 'voiceSelectEN').value;
+    var v=null;
+    if(chosenURI){ v=voices.filter(function(x){return x.voiceURI===chosenURI;})[0]||null; }
+    else { v=chooseVoice(t); }
+    if(v&&v.forcedLang){ u.lang=v.forcedLang; }
+    else if(v){ u.voice=v; u.lang=v.lang; }
+    u.rate=Math.max(0.5,Math.min(3.0, wpm[t]/180));
+  }
+
+  /* ========== wpm (separate French / English speeds) ========== */
+  var wpm={fr:150, en:250};
+  var WPM_MIN=60, WPM_MAX=500;
+  function renderWpm(){
+    ['fr','en'].forEach(function(t){
+      var v=wpm[t];
+      var a=$('wpmVal'+t.toUpperCase()+'_setup'), b=$('wpmVal'+t.toUpperCase());
+      if(a)a.textContent=v; if(b)b.textContent=v;
+    });
+    $('wpmFRr').textContent=wpm.fr; $('wpmENr').textContent=wpm.en;
+  }
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('[data-wpm]'); if(!b)return;
+    var t=b.dataset.wpm, d=parseInt(b.dataset.d,10);
+    wpm[t]=Math.max(WPM_MIN,Math.min(WPM_MAX,wpm[t]+d));
+    renderWpm();
+  });
+  renderWpm();
+
+  /* ========== gap on language change ==========
+     speechSynthesis gives no control over the silence between utterances, so
+     a French fragment and the English one after it otherwise butt straight up
+     against each other, which is exactly where a listener most needs a beat
+     to re-orient. Inserted only where the language actually changes —
+     consecutive same-language sentences run on as normal prose should. */
+  var langGapMs=180, GAP_MIN=0, GAP_MAX=1000;
+  function renderGap(){ $('gapVal').textContent=langGapMs; }
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('[data-gap]'); if(!b)return;
+    langGapMs=Math.max(GAP_MIN,Math.min(GAP_MAX,langGapMs+parseInt(b.dataset.gap,10)));
+    renderGap();
+  });
+  renderGap();
+
+  /* ========== app theme ========== */
+  var appTheme='auto';
+  function systemPrefersDark(){ return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); }
+  function stagePalette(theme){ return theme==='dark'?['#101216','#ecebe6']:['#ffffff','#000000']; }
+  function resolvedTheme(){ return appTheme==='auto' ? (systemPrefersDark()?'dark':'light') : appTheme; }
+  function applyPalette(bg,text){
+    var d=document.documentElement.style;
+    d.setProperty('--sbg',bg); d.setProperty('--stext',text);
+    $('bgPick').value=bg; $('textPick').value=text;
+    var lum=(parseInt(bg.slice(1,3),16)*0.299+parseInt(bg.slice(3,5),16)*0.587+parseInt(bg.slice(5,7),16)*0.114);
+    var isLight=lum>140;
+    $('stage').dataset.light=isLight?'1':'0';
+    // The French tint has to stay readable against whichever background the
+    // person picked, so it flips with the stage luminance like the old
+    // English-block colour did.
+    d.setProperty('--frTint', isLight ? '#1a4db3' : '#8ab4f8');
+  }
+  function syncStageTheme(){ var c=stagePalette(resolvedTheme()); applyPalette(c[0],c[1]); }
+  function applyAppTheme(){ document.documentElement.setAttribute('data-theme', appTheme==='auto' ? (systemPrefersDark()?'dark':'light') : appTheme); syncStageTheme(); }
+  function seg(id,cb){ $(id).addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
+    var ch=$(id).children; for(var i=0;i<ch.length;i++)ch[i].classList.remove('sel'); b.classList.add('sel'); cb(b.dataset.v); }); }
+  seg('themeSeg',function(v){ appTheme=v; applyAppTheme(); });
+  if(window.matchMedia){ try{ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',function(){ if(appTheme==='auto')applyAppTheme(); }); }catch(e){} }
+  applyAppTheme();
+
+  $('presets').addEventListener('click',function(e){ var b=e.target.closest('.preset'); if(!b)return; applyPalette(b.dataset.bg,b.dataset.text); });
+  ['bgPick','textPick'].forEach(function(id){ $(id).addEventListener('input',function(){ applyPalette($('bgPick').value,$('textPick').value); }); });
+  $('colorBtn').onclick=function(){$('cpanel').classList.toggle('on');};
+  $('cdone').onclick=function(){$('cpanel').classList.remove('on');};
+  $('infoBtn').onclick=showChapterToast;
+
+  /* ========== text size ========== */
+  var mainScale=1, SCALE_MIN=0.6, SCALE_MAX=2.2, SCALE_STEP=0.1;
+  function applyFontScale(){ document.documentElement.style.setProperty('--mainScale', mainScale.toFixed(2)); }
+  function persistFontScale(){ try{ localStorage.setItem('mainScale', mainScale); }catch(e){} }
+  function changeScale(d){ mainScale=Math.round(Math.max(SCALE_MIN,Math.min(SCALE_MAX,mainScale+d))*100)/100; applyFontScale(); persistFontScale(); }
+  function resetFontScale(){ mainScale=1; applyFontScale(); persistFontScale(); }
+  try{ var savedScale=parseFloat(localStorage.getItem('mainScale')); if(isFinite(savedScale)&&savedScale>0) mainScale=Math.max(SCALE_MIN,Math.min(SCALE_MAX,savedScale)); }catch(e){}
+  applyFontScale();
+
+  function showChapterToast(){
+    var el=$('chapterToast'); if(!el)return;
+    var msg;
+    if(currentBook){
+      var title=(currentBook.chapters && currentBook.chapters[currentChapterIdx]) || ('Chapter '+(currentChapterIdx+1));
+      msg=currentBook.title+' — '+title;
+    } else { msg='No chapter loaded'; }
+    el.textContent=msg; el.classList.add('show');
+    clearTimeout(el._hideTimer); el._hideTimer=setTimeout(function(){ el.classList.remove('show'); },3000);
+  }
+
+  /* ========== hide-all-controls ==========
+     The toggle itself lives OUTSIDE #topbar so it stays visible and
+     clickable while everything else is hidden — otherwise there'd be no way
+     to bring the controls back. */
+  var controlsHidden=false;
+  function applyHidden(){
+    $('topbar').style.opacity = controlsHidden?'0':'1';
+    $('topbar').style.pointerEvents = controlsHidden?'none':'auto';
+    $('controls').classList.toggle('hidden',controlsHidden);
+    $('hideBtn').textContent = controlsHidden ? '⤡' : '⤢';
+    $('hideBtn').title = controlsHidden ? 'Show all controls' : 'Hide all controls';
+  }
+  $('hideBtn').onclick=function(){ controlsHidden=!controlsHidden; applyHidden(); };
+
+  /* ========== per-language read toggles ==========
+     Both on by default: the text is read as written, switching voices. Turning
+     one off skips every fragment tagged with that language, which turns a
+     mixed paragraph into "just the French bits" or "just the English bits" —
+     the nearest thing this app has to the other two apps' single-language
+     modes. The text on screen never changes; only what's spoken does. */
+  var langEnabled={fr:true, en:true};
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('.langBtn'); if(!b)return;
+    var lang=b.dataset.lang;
+    langEnabled[lang]=!langEnabled[lang];
+    b.classList.toggle('sel', langEnabled[lang]);
+    // The readout updates straight away; the change itself takes effect at
+    // the next block (or the next repeat), since the segment list for the
+    // block being spoken right now is already half-consumed and renumbering
+    // it mid-sentence would jump the reader somewhere arbitrary.
+    updateMixNote();
+  });
+
+  /* ========== highlight mode (off / underline / gray) ==========
+     Grayscale and layout-neutral by design: background/underline only, no
+     animation, so it never reflows mid-sentence and stays legible on e-ink. */
+  var HL_MODES=['off','underline','highlight'];
+  var hlMode='off';
+  function applyHlMode(){
+    $('stage').dataset.hl = hlMode;
+    $('hlBtn').textContent = 'Highlight: ' + (hlMode==='off' ? 'Off' : hlMode==='underline' ? 'Underline' : 'Gray');
+  }
+  $('hlBtn').addEventListener('click', function(){
+    hlMode = HL_MODES[(HL_MODES.indexOf(hlMode)+1) % HL_MODES.length];
+    applyHlMode();
+  });
+  applyHlMode();
+
+  /* ========== French tint ==========
+     Off by default, because the whole premise of this app is showing the text
+     as the author wrote it. On, it colours every French fragment, which makes
+     the code-switching — the thing this book is teaching — visible without
+     reading a word. */
+  var tintOn=false;
+  function applyTint(){
+    $('stage').dataset.tint = tintOn ? 'on' : 'off';
+    $('tintBtn').textContent = 'Tint: ' + (tintOn ? 'French' : 'Off');
+  }
+  $('tintBtn').addEventListener('click', function(){ tintOn=!tintOn; applyTint(); });
+  applyTint();
+
+  /* ========== repeat count (0 / 1 / 2 extra readings per block) ========== */
+  var repeatCount=0;
+  function applyRepeatBtn(){ $('repeatBtn').textContent = 'Repeat: ' + (repeatCount===0 ? 'Off' : repeatCount+'×'); }
+  $('repeatBtn').addEventListener('click', function(){ repeatCount=(repeatCount+1)%3; applyRepeatBtn(); });
+  applyRepeatBtn();
+
+  /* ========== headphone / lock-screen media controls ==========
+     Media Session API: gives the OS a "now playing" surface (lock screen,
+     notification shade, Bluetooth/wired headset remote) that routes its
+     play/pause/next/previous controls back into this page. Wrapped in
+     try/catch since some actions throw where unsupported, and the whole API
+     may simply not exist. */
+  if('mediaSession' in navigator){
+    try{ navigator.mediaSession.setActionHandler('play', function(){ blurActive(); if(!playing) play(false); else if(paused) resumeReading(); }); }catch(e){}
+    try{ navigator.mediaSession.setActionHandler('pause', function(){ blurActive(); if(playing && !paused) pauseReading(); }); }catch(e){}
+    try{ navigator.mediaSession.setActionHandler('stop', function(){ blurActive(); stop(); }); }catch(e){}
+    try{ navigator.mediaSession.setActionHandler('previoustrack', function(){ blurActive(); prevBlock(); }); }catch(e){}
+    try{ navigator.mediaSession.setActionHandler('nexttrack', function(){ blurActive(); nextBlock(); }); }catch(e){}
+  }
+  // A hardware control firing shouldn't leave an on-screen button looking
+  // pressed, so whatever still holds focus gets blurred before we react.
+  function blurActive(){
+    try{ var a=document.activeElement; if(a && a!==document.body && typeof a.blur==='function') a.blur(); }catch(e){}
+  }
+  function updateMediaSessionMetadata(){
+    if(!('mediaSession' in navigator) || typeof MediaMetadata==='undefined') return;
+    try{
+      var chTitle=(currentBook && currentBook.chapters && currentBook.chapters[currentChapterIdx]) || '';
+      var bkTitle=currentBook ? currentBook.title : 'Mixed Reader';
+      navigator.mediaSession.metadata=new MediaMetadata({ title: chTitle||bkTitle, artist: chTitle?bkTitle:'', album:'Mixed Reader' });
+    }catch(e){}
+  }
+  function updateMediaSessionPlaybackState(){
+    if(!('mediaSession' in navigator)) return;
+    try{ navigator.mediaSession.playbackState = !playing ? 'none' : (paused ? 'paused' : 'playing'); }catch(e){}
+  }
+
+  /* ========== keep going in the background / while the screen is locked ==========
+     Two best-effort techniques, since a plain web page has no guaranteed way
+     to keep running once the screen locks:
+       1. Screen Wake Lock — keeps the screen from auto-sleeping while
+          actively reading, so it never gets backgrounded in the first place.
+       2. A real, near-silent, looping <audio> element. Browsers exempt tabs
+          that are actively playing audio from most background throttling,
+          which in practice is what keeps speechSynthesis callbacks firing
+          while backgrounded.
+     Chrome on Android honors both well; iOS Safari is far more restrictive
+     about background tabs regardless. */
+  var wakeLock=null;
+  function requestWakeLock(){
+    if(!('wakeLock' in navigator)) return;
+    navigator.wakeLock.request('screen').then(function(wl){
+      wakeLock=wl;
+      wakeLock.addEventListener('release', function(){ wakeLock=null; });
+    }).catch(function(){ /* not available right now — fine, silent */ });
+  }
+  function releaseWakeLock(){ if(wakeLock){ try{ wakeLock.release(); }catch(e){} wakeLock=null; } }
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState==='visible' && playing && !paused && !wakeLock) requestWakeLock();
+  });
+
+  var silentAudioEl=null;
+  function ensureSilentAudio(){
+    if(silentAudioEl) return silentAudioEl;
+    var a=document.createElement('audio');
+    a.src='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+    a.loop=true; a.volume=0.01; a.setAttribute('playsinline','');
+    a.style.display='none';
+    document.body.appendChild(a);
+    silentAudioEl=a;
+    return a;
+  }
+  function startSilentAudio(){ try{ ensureSilentAudio().play().catch(function(){}); }catch(e){} }
+  function stopSilentAudio(){ if(silentAudioEl){ try{ silentAudioEl.pause(); }catch(e){} } }
+
+  function onPlaybackStateChanged(){
+    updateMediaSessionPlaybackState();
+    if(playing && !paused){ requestWakeLock(); startSilentAudio(); }
+    else { stopSilentAudio(); if(!playing) releaseWakeLock(); }
+  }
+
+  /* ==========================================================================
+     BLOCK PLAYER
+     ==========================================================================
+     Each block is one paragraph/heading/table as written, already broken by
+     the build step into language-tagged segments. Playing a block means
+     walking its segments in order, speaking each with the voice and speed for
+     its own language, and highlighting the pre-baked <span data-seg="i"> that
+     the segment came from.
+
+     This is deliberately simpler than the parallel-text app's player. There,
+     a block was two whole paragraphs (one per language) spoken as two long
+     utterances, which meant pausing mid-paragraph needed character-offset
+     slicing and word-boundary tracking to resume in the right place. Here a
+     segment is at most one sentence, so pause/resume just replays the current
+     segment — no offsets, no onboundary dependency, and therefore nothing to
+     go wrong on engines (many Android voices) that never fire onboundary at
+     all. The cost is a small silence between sentences, which in a
+     code-switching book is a feature more than a cost. */
+  var blocks=[], idx=0, playing=false;
+  var playMode='continue';    // 'single' = read the target block only, then stop
+  var paused=false;
+  var units=null, unitIdx=0;  // the current block's speakable segments, and where we are
+  var repeatsLeft=0;          // extra readings of the current block still owed
+  var activeChunk=null;       // the utterance on air right now
+  var lastSpokenLang=null;    // to decide whether a gap is needed before the next one
+  var gapTimer=null, fallbackTimer=null, fallbackDeadline=null;
+
+  function loadBlocks(list){
+    stop();
+    blocks=list||[]; idx=0;
+    $('setup').style.display='none';
+    $('reader').classList.add('on'); $('reader').style.display='flex';
+    renderBlock();
+  }
+
+  function renderBlock(){
+    var inner=$('textInner'); inner.innerHTML='';
+    var b=blocks[idx];
+    if(!b){ $('pos').textContent=0; $('total').textContent=0; $('mixNote').textContent=''; $('playBtn').textContent='\u25b6'; return; }
+    var el=document.createElement('div');
+    el.id='blockEl';
+    el.className='mixBlock'
+      + (b.type==='heading' ? (' mixHeading lvl'+(b.level||3)) : '')
+      + (b.type==='table' ? ' mixTableWrap' : '')
+      + (b.quote ? ' mixQuote' : '');
+    // The HTML already contains the .ttsSeg spans, so it goes in as-is — no
+    // DOM walking or sentence-guessing at render time (the parallel-text app
+    // has to do that because its source blocks are plain paragraphs).
+    el.innerHTML=b.html||'';
+    inner.appendChild(el);
+    $('pos').textContent=blocks.length?idx+1:0;
+    $('total').textContent=blocks.length;
+    updateMixNote();
+    $('playBtn').textContent=(playing && !paused)?'\u275a\u275a':'\u25b6';
+    $('textDisplay').scrollTop=0;
+  }
+  // Small readout showing what's in this block and what will actually be
+  // spoken — useful when one of the language toggles is off, since the text on
+  // screen looks unchanged but half of it has gone silent.
+  function updateMixNote(){
+    var b=blocks[idx], note=$('mixNote'); if(!note) return;
+    if(!b || !b.segs){ note.textContent=''; return; }
+    var nFr=0, nEn=0;
+    b.segs.forEach(function(s){ if(s.lang==='fr') nFr++; else nEn++; });
+    var parts=[];
+    if(nFr) parts.push(nFr+' fr');
+    if(nEn) parts.push(nEn+' en');
+    var muted=[];
+    if(nFr && !langEnabled.fr) muted.push('fr');
+    if(nEn && !langEnabled.en) muted.push('en');
+    note.textContent = parts.join(' + ') + (muted.length ? ' (' + muted.join('/') + ' muted)' : '');
+  }
+  function updatePlayBtnIcon(){ $('playBtn').textContent=(playing && !paused)?'\u275a\u275a':'\u25b6'; }
+
+  // The block's segments, filtered to what should actually be spoken. Built
+  // fresh at the start of each reading so toggling a language mid-book takes
+  // effect immediately.
+  function buildUnits(b){
+    var out=[];
+    (b.segs||[]).forEach(function(s,i){
+      if(!langEnabled[s.lang]) return;
+      if(!s.text || !s.text.trim()) return;
+      out.push({ i:i, lang:s.lang, text:s.text });
+    });
+    return out;
+  }
+  function highlightUnit(unit){
+    clearHighlight();
+    var el=$('blockEl'); if(!el || !unit) return;
+    // One data-seg can legitimately appear more than once (a segment split
+    // across a <strong> boundary), so every span carrying the index lights up.
+    var spans=el.querySelectorAll('.ttsSeg[data-seg="'+unit.i+'"]');
+    for(var i=0;i<spans.length;i++) spans[i].classList.add('speaking');
+    // Keep the spoken line in view in a block too tall for the screen (long
+    // vocabulary tables, mostly).
+    if(spans.length && spans[0].scrollIntoView){
+      try{ spans[0].scrollIntoView({block:'nearest'}); }catch(e){}
+    }
+  }
+  function clearHighlight(){
+    var el=$('blockEl'); if(!el) return;
+    var spans=el.querySelectorAll('.ttsSeg.speaking');
+    for(var i=0;i<spans.length;i++) spans[i].classList.remove('speaking');
+  }
+  function durationForUnit(unit){
+    var words=(unit.text||'').split(/\s+/).filter(Boolean).length;
+    return Math.max(400, words/(wpm[unit.lang]||150)*60000);
+  }
+
+  function speakUnit(unit, onEnd){
+    var chunk={ unit:unit };
+    activeChunk=chunk;
+    var u=new SpeechSynthesisUtterance(unit.text);
+    applyVoiceSettings(u, unit.lang);
+    function finish(){ if(activeChunk!==chunk) return; activeChunk=null; onEnd(); }
+    u.onend=finish; u.onerror=finish;
+    window.speechSynthesis.speak(u);
+  }
+  // Wraps speakUnit with a one-time retry: if our utterance is still the
+  // active one ~450ms in yet the engine reports nothing is speaking, that's
+  // the known WebKit/iOS bug where speak() straight after cancel() (exactly
+  // what resuming from a pause does) silently produces no audio. Re-issuing
+  // once from a clean cancel() reliably recovers it. Used only on resume —
+  // ordinary sequential playback never needed it.
+  function speakUnitWithRetry(unit, onEnd){
+    speakUnit(unit, onEnd);
+    setTimeout(function(){
+      if(!hasTTS || !activeChunk || activeChunk.unit!==unit) return;
+      try{
+        if(!window.speechSynthesis.speaking){
+          window.speechSynthesis.cancel();
+          speakUnit(unit, onEnd);
+        }
+      }catch(e){}
+    }, 450);
+  }
+
+  function runUnit(){
+    if(!playing || paused) return;
+    var unit=units && units[unitIdx];
+    if(!unit){ blockFinished(); return; }
+    highlightUnit(unit);
+    if(!hasTTS){ startFallbackTimer(durationForUnit(unit), unitDone); return; }
+    // The gap goes in only at an actual language switch, so ordinary prose
+    // still reads as continuous prose.
+    var needGap = (lastSpokenLang && lastSpokenLang!==unit.lang && langGapMs>0);
+    lastSpokenLang=unit.lang;
+    if(needGap){
+      clearTimeout(gapTimer);
+      gapTimer=setTimeout(function(){ if(playing && !paused) speakUnit(unit, unitDone); }, langGapMs);
+    } else {
+      speakUnit(unit, unitDone);
+    }
+  }
+  function unitDone(){
+    if(!playing || paused) return;
+    unitIdx++;
+    runUnit();
+  }
+  // Every segment of the block has been read. Repeat it if repeats are owed,
+  // otherwise move on.
+  function blockFinished(){
+    clearHighlight();
+    if(repeatsLeft>0){
+      repeatsLeft--;
+      unitIdx=0; lastSpokenLang=null;
+      units=buildUnits(blocks[idx]);   // rebuilt in case a toggle changed mid-read
+      runUnit();
+      return;
+    }
+    advanceOrStop();
+  }
+  function runCurrentBlock(){
+    if(!playing) return;
+    var b=blocks[idx]; if(!b){ stop(); return; }
+    units=buildUnits(b); unitIdx=0; repeatsLeft=repeatCount; lastSpokenLang=null;
+    if(!units.length){
+      // Nothing audible in this block. If BOTH languages are muted that's
+      // true of every block, so racing silently to the end of the chapter
+      // would be worse than useless — just stop. Otherwise this is a block
+      // that happens to hold only the muted language (very common: the
+      // English blockquote after a French paragraph), so skip it. The skip
+      // is deferred rather than recursive: a chapter of 3,500 blocks would
+      // otherwise nest 3,500 calls deep and blow the stack.
+      if(!langEnabled.fr && !langEnabled.en){ stop(); return; }
+      setTimeout(advanceOrStop, 0);
+      return;
+    }
+    runUnit();
+  }
+  function advanceOrStop(){
+    if(!playing || paused) return;
+    if(playMode==='single'){ stop(); return; }
+    if(idx+1>=blocks.length){ stop(); return; }
+    idx++; renderBlock(); runCurrentBlock();
+  }
+
+  function startFallbackTimer(ms, onEnd){
+    clearTimeout(fallbackTimer);
+    fallbackDeadline=Date.now()+ms;
+    fallbackTimer=setTimeout(function(){ fallbackDeadline=null; onEnd(); }, ms);
+  }
+
+  function play(singleBlockOnly){
+    if(!blocks.length)return;
+    if(idx>=blocks.length)idx=0;
+    playing=true; paused=false;
+    playMode = singleBlockOnly ? 'single' : 'continue';
+    renderBlock();
+    onPlaybackStateChanged();
+    runCurrentBlock();
+  }
+  function stop(){
+    playing=false; paused=false; activeChunk=null;
+    units=null; unitIdx=0; repeatsLeft=0; lastSpokenLang=null;
+    clearTimeout(gapTimer);
+    clearTimeout(fallbackTimer); fallbackDeadline=null;
+    if(hasTTS){ try{ window.speechSynthesis.cancel(); }catch(e){} }
+    clearHighlight();
+    renderBlock();
+    onPlaybackStateChanged();
+  }
+  // Pause/resume is per-segment: the current segment is abandoned and replayed
+  // from its own start on resume. Because a segment is at most one sentence
+  // that costs at most a repeated sentence, and it needs no word-boundary
+  // support from the engine — which is why it behaves the same on every
+  // platform. Only the play/pause icon is updated (not a full renderBlock) so
+  // a scroll position isn't yanked out from under the reader mid-pause.
+  function pauseReading(){
+    if(!playing || paused) return;
+    paused=true;
+    clearTimeout(gapTimer);
+    if(hasTTS){ try{ window.speechSynthesis.cancel(); }catch(e){} }
+    activeChunk=null;
+    if(fallbackDeadline!=null){ clearTimeout(fallbackTimer); fallbackDeadline=null; }
+    clearHighlight();
+    updatePlayBtnIcon();
+    onPlaybackStateChanged();
+  }
+  function resumeReading(){
+    if(!playing || !paused) return;
+    paused=false;
+    // Replaying the same segment means the gap logic shouldn't fire again.
+    lastSpokenLang=null;
+    var unit=units && units[unitIdx];
+    if(unit && hasTTS){ highlightUnit(unit); lastSpokenLang=unit.lang; speakUnitWithRetry(unit, unitDone); }
+    else { runCurrentBlock(); }
+    updatePlayBtnIcon();
+    onPlaybackStateChanged();
+  }
+  function toggle(){
+    if(!playing){ play(false); }
+    else if(paused){ resumeReading(); }
+    else { pauseReading(); }
+  }
+  function gotoBlock(target, playIt){
+    stop();
+    idx=Math.max(0,Math.min(target,blocks.length-1));
+    if(playIt) play(true); else renderBlock();
+  }
+  function nextBlock(){ gotoBlock(idx+1, true); }
+  function prevBlock(){ gotoBlock(idx-1, true); }
+  function replayBlock(){ gotoBlock(idx, true); }
+  function reset(){ gotoBlock(0, false); }
+
+  var actions={toggle:toggle, reset:reset, replay:replayBlock,
+    prevBlock:prevBlock, nextBlock:nextBlock,
+    mainDown:function(){changeScale(-SCALE_STEP);}, mainUp:function(){changeScale(SCALE_STEP);}, fontReset:resetFontScale};
+  document.addEventListener('click',function(e){ var el=e.target.closest('[data-act]'); if(el&&actions[el.dataset.act])actions[el.dataset.act](); });
+  document.addEventListener('keydown',function(e){ if(!$('reader').classList.contains('on'))return;
+    if(e.code==='Space'){e.preventDefault();toggle();}
+    else if(e.code==='ArrowLeft')prevBlock(); else if(e.code==='ArrowRight')nextBlock();
+    // Wired-headphone / keyboard media keys (desktop OSes surface a headset's
+    // inline remote as these standard media-key codes when the tab is focused).
+    else if(e.code==='MediaPlayPause'){ e.preventDefault(); blurActive(); toggle(); }
+    else if(e.code==='MediaPlay'){ e.preventDefault(); blurActive(); if(!playing) play(false); else if(paused) resumeReading(); }
+    else if(e.code==='MediaPause'){ e.preventDefault(); blurActive(); if(playing && !paused) pauseReading(); }
+    else if(e.code==='MediaTrackNext'){ e.preventDefault(); blurActive(); nextBlock(); }
+    else if(e.code==='MediaTrackPrevious'){ e.preventDefault(); blurActive(); prevBlock(); } });
+
+  /* ========== double-tap zones ==========
+     Single tap does nothing, so the reading area still scrolls normally; only
+     a DOUBLE tap navigates — right 40% next block, left 40% previous block,
+     middle 20% replay the current one. Listening on #textDisplay itself
+     (rather than an overlay) is what keeps native scrolling working: an
+     overlay would swallow wheel/touch events, while a genuine tap here still
+     fires a real 'click' and a scroll gesture doesn't. */
+  var DBL_MS=350;
+  function makeDoubleTap(el, fn){
+    var lastT=0;
+    el.addEventListener('click',function(e){
+      var t=Date.now();
+      if(t-lastT<=DBL_MS){ lastT=0; fn(e); } else { lastT=t; }
+    });
+  }
+  function zoneAtX(el,x){
+    var r=el.getBoundingClientRect();
+    var frac=(x-r.left)/r.width;
+    if(frac<0.4) return 'left';
+    if(frac>0.6) return 'right';
+    return 'mid';
+  }
+  makeDoubleTap($('textDisplay'), function(e){
+    var zone=zoneAtX($('textDisplay'), e.clientX);
+    if(zone==='right') nextBlock();
+    else if(zone==='left') prevBlock();
+    else replayBlock();
+  });
+
+})();
+</script>
+</body>
+</html>
