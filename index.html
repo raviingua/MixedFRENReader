@@ -116,11 +116,21 @@
   .fontRow{justify-content:center;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
   .fontRow .pill{flex:0 0 auto}
 
+  /* Chapter overlay. Sits above everything (including the colour panel and
+     the hide-controls button) and is pointer-events:none, so it can never
+     reflow, cover-and-swallow, or otherwise touch the text underneath —
+     it only paints over it briefly. */
   .chapterToast{position:absolute;top:64px;left:50%;transform:translateX(-50%);max-width:88%;
     background:rgba(0,0,0,.75);color:#fff;font-size:12.5px;line-height:1.4;text-align:center;
-    padding:9px 14px;border-radius:10px;z-index:8;opacity:0;pointer-events:none;transition:opacity .25s}
+    padding:9px 14px;border-radius:10px;z-index:12;opacity:0;pointer-events:none;transition:opacity .25s}
   .chapterToast.show{opacity:1}
+  /* The automatic-chapter-change flash: smaller, dimmer, faster to fade, and
+     pinned to the very top edge so it sits over the (usually hidden) control
+     bar rather than over the line being read. */
+  .chapterToast.flash{top:10px;font-size:11.5px;padding:6px 12px;background:rgba(0,0,0,.6);
+    transition:opacity .18s}
   .stage[data-light="1"] .chapterToast{background:rgba(255,255,255,.88);color:#222;border:1px solid #ccc}
+  .stage[data-light="1"] .chapterToast.flash{background:rgba(255,255,255,.82)}
 
   .textDisplay{position:absolute;inset:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
     padding:70px 6% 26px;z-index:2;display:flex;align-items:center;touch-action:pan-y;
@@ -205,6 +215,7 @@
     .pill{padding:5px 9px;font-size:11px}
     .fontRow{gap:4px}
     .chapterToast{top:40px;font-size:11px;padding:7px 11px}
+    .chapterToast.flash{top:6px;font-size:10.5px;padding:5px 10px}
     .textDisplay{padding:52px 6% 16px}
     .hideToggle{top:4px;right:6px;padding:5px 8px;font-size:11px}
   }
@@ -298,6 +309,7 @@
           <button class="pill" id="hlBtn" title="Cycle how the part being read is highlighted (off / underline / gray)">Highlight: Off</button>
           <button class="pill" id="repeatBtn" title="Repeat each block 0, 1, or 2 extra times">Repeat: Off</button>
           <button class="pill" id="tintBtn" title="Colour the French fragments so the language switching is visible">Tint: Off</button>
+          <button class="pill" id="autoNextBtn" title="When a chapter ends, roll straight into the next one instead of stopping">Auto&#8209;chapter: On</button>
         </div>
       </div>
       <button class="pill icon hideToggle" id="hideBtn" title="Hide all controls">⤢</button>
@@ -438,22 +450,25 @@
     $('nextChapterBtn').style.display = has ? '' : 'none';
   }
 
-  function openChapterContent(b,ci,content){
+  function openChapterContent(b,ci,content,autoPlay){
     var c=content.chapters[ci];
     if(!c){ $('err').textContent='Chapter not found.'; return; }
     currentBook=b; currentChapterIdx=ci; updateChapterNavUI();
     $('err').textContent='';
     loadBlocks(c.blocks);
+    syncChapterSelect();
     updateMediaSessionMetadata();
+    flashChapter(b.chapters[ci]);
+    if(autoPlay) play(false);
   }
-  function loadChapterByIndex(b,ci){
+  function loadChapterByIndex(b,ci,autoPlay){
     if(!b)return;
-    if(bookCache[b.id]){ openChapterContent(b,ci,bookCache[b.id]); return; }
+    if(bookCache[b.id]){ openChapterContent(b,ci,bookCache[b.id],autoPlay); return; }
     $('err').textContent='Loading chapter\u2026';
     ensureKey()
       .then(function(key){ return fetch(b.file).then(function(r){ if(!r.ok)throw {load:true}; return r.json(); })
         .then(function(raw){ return MANIFEST.crypto ? decryptBook(raw,key) : raw; }); })
-      .then(function(content){ bookCache[b.id]=content; rememberPass(); openChapterContent(b,ci,content); })
+      .then(function(content){ bookCache[b.id]=content; rememberPass(); openChapterContent(b,ci,content,autoPlay); })
       .catch(function(e){
         if(e&&e.noPass){ $('err').textContent='Enter your books password above, then tap Load.'; }
         else if(e&&e.load){ $('err').textContent='Could not load that book file ('+b.file+').'; }
@@ -470,13 +485,18 @@
     if(!selectedBook)return; var ci=parseInt(chapSel.value,10)||0;
     loadChapterByIndex(selectedBook,ci);
   });
+  // Prev/Next chapter carry playback with them: if it was reading when you
+  // tapped, it keeps reading in the new chapter rather than going silent and
+  // waiting to be told to start again.
   $('prevChapterBtn').addEventListener('click',function(){
     if(!currentBook)return; var n=currentBook.chapters.length; if(!n)return;
-    loadChapterByIndex(currentBook,(currentChapterIdx-1+n)%n);
+    var keep = playing && !paused;
+    loadChapterByIndex(currentBook,(currentChapterIdx-1+n)%n,keep);
   });
   $('nextChapterBtn').addEventListener('click',function(){
     if(!currentBook)return; var n=currentBook.chapters.length; if(!n)return;
-    loadChapterByIndex(currentBook,(currentChapterIdx+1)%n);
+    var keep = playing && !paused;
+    loadChapterByIndex(currentBook,(currentChapterIdx+1)%n,keep);
   });
   $('closeBtn').onclick=function(){ stop(); $('reader').classList.remove('on'); $('reader').style.display='none'; $('setup').style.display='flex'; };
 
@@ -625,15 +645,37 @@
   try{ var savedScale=parseFloat(localStorage.getItem('mainScale')); if(isFinite(savedScale)&&savedScale>0) mainScale=Math.max(SCALE_MIN,Math.min(SCALE_MAX,savedScale)); }catch(e){}
   applyFontScale();
 
-  function showChapterToast(){
+  /* ========== chapter toast / flash ==========
+     One overlay element, two uses. The ⓘ button shows book + chapter for a
+     few seconds; an automatic chapter change flashes just the chapter title
+     for about a second.
+
+     It is a child of .stage and NOT of #topbar, which is what makes it work
+     in the hide-all-controls view — that hides #topbar, so anything living
+     inside the bar would vanish exactly when the reader is listening
+     hands-free and most needs to know the chapter turned over. Being
+     absolutely positioned with pointer-events:none, it can never reflow or
+     intercept anything in the text underneath it either. */
+  var CHAPTER_FLASH_MS=1000;
+  function showToast(msg, ms, isFlash){
     var el=$('chapterToast'); if(!el)return;
+    el.textContent=msg;
+    el.classList.toggle('flash', !!isFlash);
+    el.classList.add('show');
+    clearTimeout(el._hideTimer);
+    el._hideTimer=setTimeout(function(){ el.classList.remove('show'); }, ms);
+  }
+  function showChapterToast(){
     var msg;
     if(currentBook){
       var title=(currentBook.chapters && currentBook.chapters[currentChapterIdx]) || ('Chapter '+(currentChapterIdx+1));
       msg=currentBook.title+' — '+title;
     } else { msg='No chapter loaded'; }
-    el.textContent=msg; el.classList.add('show');
-    clearTimeout(el._hideTimer); el._hideTimer=setTimeout(function(){ el.classList.remove('show'); },3000);
+    showToast(msg, 3000, false);
+  }
+  // The brief one, shown when the reader moves itself to a new chapter.
+  function flashChapter(title){
+    showToast(title || ('Chapter '+(currentChapterIdx+1)), CHAPTER_FLASH_MS, true);
   }
 
   /* ========== hide-all-controls ==========
@@ -805,11 +847,18 @@
   var lastSpokenLang=null;    // to decide whether a gap is needed before the next one
   var gapTimer=null, fallbackTimer=null, fallbackDeadline=null;
 
-  function loadBlocks(list){
-    stop();
+  // Swaps in a chapter's blocks WITHOUT touching playback state. Auto-advance
+  // needs this: the old loadBlocks() called stop() first, which is right when
+  // a person picks a chapter by hand but would kill the audio at exactly the
+  // moment continuous listening is supposed to carry on.
+  function setBlocks(list){
     blocks=list||[]; idx=0;
     $('setup').style.display='none';
     $('reader').classList.add('on'); $('reader').style.display='flex';
+  }
+  function loadBlocks(list){
+    stop();
+    setBlocks(list);
     renderBlock();
   }
 
@@ -971,8 +1020,58 @@
   function advanceOrStop(){
     if(!playing || paused) return;
     if(playMode==='single'){ stop(); return; }
-    if(idx+1>=blocks.length){ stop(); return; }
+    if(idx+1>=blocks.length){
+      // End of the chapter. Roll straight into the next one so a listening
+      // session isn't broken up every few minutes by having to pick the next
+      // chapter by hand. Only in 'continue' mode — the block buttons
+      // (next/prev/replay) read exactly one block and are meant to stop.
+      if(advanceChapterAndContinue()) return;
+      stop(); return;
+    }
     idx++; renderBlock(); runCurrentBlock();
+  }
+
+  /* ========== automatic chapter advance ==========
+     The whole book lives in ONE decrypted object in bookCache, so moving to
+     the next chapter is just picking a different entry — no fetch, no
+     re-derivation of the key, no audible gap. (The async branch below exists
+     only for the case where the cache somehow isn't there; in normal use it
+     never runs.) */
+  var autoNextChapter=true;
+  function applyAutoNextBtn(){
+    $('autoNextBtn').textContent = 'Auto‑chapter: ' + (autoNextChapter ? 'On' : 'Off');
+  }
+  $('autoNextBtn').addEventListener('click', function(){ autoNextChapter=!autoNextChapter; applyAutoNextBtn(); });
+  applyAutoNextBtn();
+
+  function advanceChapterAndContinue(){
+    if(!autoNextChapter) return false;
+    if(!currentBook || !currentBook.chapters) return false;
+    var next=currentChapterIdx+1;
+    if(next>=currentBook.chapters.length) return false;   // end of the book: stop for real
+    var content=bookCache[currentBook.id];
+    if(content && content.chapters && content.chapters[next]){
+      currentChapterIdx=next;
+      setBlocks(content.chapters[next].blocks);
+      renderBlock();
+      syncChapterSelect();
+      updateMediaSessionMetadata();
+      flashChapter(currentBook.chapters[next]);
+      runCurrentBlock();
+      return true;
+    }
+    // Not cached — there's no way to continue without a round trip, so stop
+    // cleanly first and let the normal loader resume playback when it lands.
+    stop();
+    loadChapterByIndex(currentBook, next, true);
+    return true;
+  }
+  // Keep the setup screen's chapter dropdown pointing at whatever is actually
+  // being read, so closing and reopening it doesn't show a stale chapter.
+  function syncChapterSelect(){
+    if(selectedBook && currentBook && selectedBook.id===currentBook.id && chapSel.options.length>currentChapterIdx){
+      chapSel.value=String(currentChapterIdx);
+    }
   }
 
   function startFallbackTimer(ms, onEnd){
