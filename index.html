@@ -152,6 +152,15 @@
      English translation of the block above"; here it means nothing more than
      "this was indented in the source", so it's shown indented and nothing
      else is assumed about it. */
+  /* ASCII-art blocks: the grammar books' decision flowcharts and family
+     trees, drawn with box-drawing characters. These MUST keep their line
+     breaks and their spacing and be set in a monospace font — reflowed as
+     prose in a serif face they become unreadable. Their frame characters are
+     already excluded from speech at build time, so what gets read aloud is
+     the text inside the boxes. */
+  .mixArt{white-space:pre;font-family:"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+    font-size:calc(clamp(11px,2.5vw,15px) * var(--mainScale,1));line-height:1.35;
+    overflow-x:auto;text-align:left}
   .mixQuote{border-left:3px solid currentColor;padding-left:.7em;opacity:.92}
   .liMark{opacity:.55}
   /* Pipe tables (vocab lists, conjugation charts, exam grids). Cells are
@@ -871,6 +880,7 @@
     el.className='mixBlock'
       + (b.type==='heading' ? (' mixHeading lvl'+(b.level||3)) : '')
       + (b.type==='table' ? ' mixTableWrap' : '')
+      + (b.type==='art' ? ' mixArt' : '')
       + (b.quote ? ' mixQuote' : '');
     // The HTML already contains the .ttsSeg spans, so it goes in as-is — no
     // DOM walking or sentence-guessing at render time (the parallel-text app
