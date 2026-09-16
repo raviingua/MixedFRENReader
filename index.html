@@ -259,6 +259,16 @@
   .navrow button small{font-size:9.5px;letter-spacing:.3px}
   .navrow button:active{transform:translateY(1px)}
 
+  /* While a question is on screen the exercise panel is the only thing that
+     should be reachable. Everything below it is hidden: the colour panel (it
+     shares the bottom of the stage and could be opened over the question), and
+     the whole control strip — speed steppers, play, prev/replay/next — whose
+     jobs are all either taken over by the panel or a distraction from it.
+     Hiding the strip also gives the stage its full height, so more of the
+     chapter stays visible above the question. Everything returns the moment
+     the exercise is left. */
+  #reader.exOpen .controls{display:none}
+  #reader.exOpen .cpanel{display:none}
   .cpanel{position:absolute;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--line);
     padding:14px;z-index:9;transform:translateY(110%);transition:transform .22s;display:flex;flex-direction:column;gap:10px}
   .cpanel.on{transform:translateY(0)}
@@ -1006,6 +1016,8 @@
     $('exProgress').textContent = (exDone+1)+' / '+exTotal;
     $('exInput').value='';
     $('exPanel').classList.add('on');
+    $('cpanel').classList.remove('on');      // never leave the colour panel open under it
+    $('reader').classList.add('exOpen');
     // Don't steal focus on a touch device — the on-screen keyboard springing
     // up over the text is worse than one extra tap.
     if(prefersAutoFocus()) focusLater(function(){ return $('exInput'); }, 60);
@@ -1071,6 +1083,7 @@
     if(!exAwaiting && !exActive){ $('exPanel').classList.remove('on'); return; }
     exAwaiting=false; exActive=null;
     $('exPanel').classList.remove('on');
+    $('reader').classList.remove('exOpen');
     if(hasTTS){ try{ window.speechSynthesis.cancel(); }catch(e){} }
     if(!silent && playing){ paused=false; lastSpokenLang=null; runUnit(); }
     updatePlayBtnIcon();
@@ -1178,16 +1191,20 @@
     return el;
   }
   // Move id="blockEl" and the accent onto the block now being read.
-  function markCurrent(scroll){
+  //
+  // Deliberately does NOT scroll. In whole-chapter view the page is yours to
+  // move around: the marker travels from block to block so you can see where
+  // the reading is, but the view never yanks itself, which would fight you
+  // every time you scrolled back to re-read something or looked ahead at the
+  // instructions while answering. The page still starts at the top when a
+  // chapter is first opened.
+  function markCurrent(){
     var prev=$('blockEl');
     if(prev){ prev.removeAttribute('id'); prev.classList.remove('isCurrent'); }
     var el=$('textInner').querySelector('[data-blk="'+idx+'"]');
     if(!el) return;
     el.id='blockEl';
     el.classList.add('isCurrent');
-    if(scroll && viewAll && el.scrollIntoView){
-      try{ el.scrollIntoView({ block:'center', behavior:'auto' }); }catch(e){}
-    }
   }
   function renderBlock(){
     var inner=$('textInner');
@@ -1217,7 +1234,7 @@
       inner.appendChild(makeBlockEl(b, idx));
       $('textDisplay').scrollTop=0;
     }
-    markCurrent(true);
+    markCurrent();
     $('pos').textContent=blocks.length?idx+1:0;
     $('total').textContent=blocks.length;
     updateMixNote();
@@ -1275,7 +1292,11 @@
     for(var i=0;i<spans.length;i++) spans[i].classList.add('speaking');
     // Keep the spoken line in view in a block too tall for the screen (long
     // vocabulary tables, mostly).
-    if(spans.length && spans[0].scrollIntoView){
+    // Only in single-block view, where the block was just rendered at the top
+    // of an empty stage and a tall one (a long vocabulary table) would
+    // otherwise be read from off-screen. In whole-chapter view the scroll
+    // position belongs to the reader and is left alone.
+    if(!viewAll && spans.length && spans[0].scrollIntoView){
       try{ spans[0].scrollIntoView({block:'nearest'}); }catch(e){}
     }
   }
@@ -1460,6 +1481,7 @@
   function stop(){
     exAwaiting=false; exActive=null;
     var ep=$('exPanel'); if(ep) ep.classList.remove('on');
+    var rd=$('reader'); if(rd) rd.classList.remove('exOpen');
     playing=false; paused=false; activeChunk=null;
     units=null; unitIdx=0; repeatsLeft=0; lastSpokenLang=null;
     clearTimeout(gapTimer);
