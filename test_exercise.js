@@ -172,6 +172,67 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const stillStops = panel.classList.contains('on');
   check(!stillStops, 'with the mode off, questions no longer interrupt');
 
+  // ---- keyboard-only operation ----
+  // The whole point: type, Enter to check, Enter to go on, without ever
+  // reaching for the mouse.
+  console.log('\nkeyboard-only run:');
+  doc.getElementById('exModeBtn').click();            // back on
+  doc.querySelector('[data-act="reset"]').click(); await sleep(10);
+  doc.getElementById('playBtn').click();
+  waited = 0;
+  while(!panel.classList.contains('on') && waited < 400){ await sleep(25); waited++; }
+  check(panel.classList.contains('on'), 'a question is waiting again');
+
+  function pressEnter(target){
+    const ev = new w.KeyboardEvent('keydown', { key:'Enter', bubbles:true, cancelable:true });
+    Object.defineProperty(ev, 'target', { value: target });
+    (target || doc).dispatchEvent(ev);
+    return ev;
+  }
+
+  const qBefore = doc.getElementById('exQ').textContent;
+  doc.getElementById('exInput').value = 'ma réponse';
+  pressEnter(doc.getElementById('exInput'));         // Enter #1: check
+  await sleep(60);
+  check(doc.getElementById('exCompare').style.display !== 'none',
+        'Enter in the box checks the answer');
+  check(doc.getElementById('exYours').textContent === 'ma réponse', 'the typed answer is kept');
+  // After checking, focus must not be stranded: Next should hold it.
+  check(doc.activeElement === doc.getElementById('exNext'),
+        'focus moves to Next once the answer is shown');
+
+  pressEnter(doc.activeElement);                      // Enter #2: next question
+  waited = 0;
+  while(!panel.classList.contains('on') && waited < 400){ await sleep(25); waited++; }
+  check(panel.classList.contains('on'), 'a second Enter advances to the next question');
+  check(doc.getElementById('exQ').textContent !== qBefore, 'and it really is the next one');
+  check(doc.getElementById('exCompare').style.display === 'none',
+        'the new question starts unanswered');
+  check(doc.getElementById('exAskRow').style.display !== 'none', 'with the input offered again');
+
+  // Two more rounds with no mouse at all, to prove the loop holds.
+  let rounds = 0;
+  for(let r = 0; r < 2; r++){
+    doc.getElementById('exInput').value = 'x' + r;
+    pressEnter(doc.getElementById('exInput'));
+    await sleep(60);
+    if(doc.getElementById('exCompare').style.display === 'none') break;
+    pressEnter(doc.activeElement);
+    waited = 0;
+    while(!panel.classList.contains('on') && waited < 400){ await sleep(25); waited++; }
+    if(!panel.classList.contains('on')) break;
+    rounds++;
+  }
+  check(rounds === 2, 'the type / Enter / Enter loop keeps working (' + rounds + ' further rounds)');
+
+  // Shift+Enter must still insert a newline rather than checking.
+  const shiftEv = new w.KeyboardEvent('keydown', { key:'Enter', shiftKey:true, bubbles:true, cancelable:true });
+  Object.defineProperty(shiftEv, 'target', { value: doc.getElementById('exInput') });
+  doc.getElementById('exInput').dispatchEvent(shiftEv);
+  await sleep(30);
+  check(doc.getElementById('exCompare').style.display === 'none',
+        'Shift+Enter does not check — it is still a newline');
+
   console.log('\n' + (fails ? fails+' CHECK(S) FAILED' : 'ALL CHECKS PASSED'));
   process.exit(fails ? 1 : 0);
 })();

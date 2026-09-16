@@ -49,7 +49,8 @@ exists.
 | `index_mixed.html` | The reader. Single self-contained file. |
 | `test_reader.js` | Optional end-to-end playback test (needs `npm i jsdom`). |
 | `test_autochapter.js` | Optional test for continuous chapter playback. |
-| `test_exercise.js` | 26 checks for exercise mode (needs jsdom). |
+| `test_exercise.js` | 36 checks for exercise mode, incl. keyboard-only (needs jsdom). |
+| `test_chapterview.js` | 29 checks for whole-chapter view (needs jsdom). |
 | `test_lexicon.js` | 116 checks: classifier, word lists, speech cleanup, chapter structure. |
 | `tools/verify_build.js` | Checks a whole built library for fidelity and integrity. |
 | `tools/audit_report.py` | Flags likely mis-tagged segments in a `--report` file. |
@@ -303,6 +304,39 @@ Marking free-form French right or wrong would be guesswork dressed up as
 authority, and these answer keys routinely print several acceptable forms
 separated by "/". The only thing the panel asserts is when your text is
 *identical* to the book's.
+
+### Whole-chapter view
+
+A **View: Block / Chapter** pill. On **Chapter**, the whole chapter is on one
+scrollable page with the block being read marked by an accent bar — useful for
+working an exercise with the surrounding explanation still visible, or for any
+time you want more context than one paragraph.
+
+**Nothing about reading changes.** It is a rendering change only: playback
+still moves block by block, highlighting is still per segment, exercise mode
+still stops for input, and the per-language voices and speeds are untouched.
+The current block keeps `id="blockEl"` in both views, which is what lets the
+whole player go on working without knowing which view it is in.
+
+Blocks are deliberately **not** dimmed. The point of this view is reading the
+context while you answer, and greying it would defeat that.
+
+The page is built once per chapter, so moving from block to block only moves
+the marker and scrolls — a long chapter is not rebuilt on every sentence, and
+your scroll position survives. The largest chapter in these books is 224
+blocks / 71 KB of HTML, which a browser renders without noticing.
+
+### Working an exercise from the keyboard
+
+Type, **Enter** to check, **Enter** again for the next question — the whole
+exercise runs without the mouse. The cursor is placed in the answer box when a
+question appears, and moves to **Next** once the answer is shown, so Enter
+always has something to act on. Space does the same as Enter while the panel is
+open, and Shift+Enter is still a newline for the longer writing tasks.
+
+The cursor is not auto-placed on a coarse-pointer (touch) device, where it
+would throw an on-screen keyboard over the text; tap the box instead.
+
 
 ### How questions find their answers
 

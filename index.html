@@ -225,6 +225,22 @@
     .exPanel{padding:10px 11px 12px;max-height:80%}
     .exQ{font-size:14px}
   }
+
+  /* ===== whole-chapter view =====
+     Every block of the chapter on one scrollable page, with the one being read
+     marked. Reading, highlighting and exercise mode are untouched: the current
+     block still carries id="blockEl", so every piece of the player that looks
+     things up through it keeps working exactly as before — this is a rendering
+     change only.
+     Blocks are NOT dimmed. The point of this view is reading the surrounding
+     context while answering an exercise, and greying it would defeat that; the
+     current block is marked with an accent bar instead. */
+  .textDisplay.viewAll{align-items:flex-start}
+  .textDisplay.viewAll .inner{margin:0}
+  .viewAll .mixBlock{margin:0 0 .85em;padding-left:.6em;
+    border-left:3px solid transparent;transition:border-color .15s}
+  .viewAll .mixBlock.isCurrent{border-left-color:var(--accent)}
+  .stage[data-light="1"] .viewAll .mixBlock.isCurrent{border-left-color:var(--accent)}
   .controls{display:flex;flex-direction:column;flex:0 0 auto;transition:opacity .2s,max-height .2s;overflow:hidden}
   .controls.hidden{max-height:0;opacity:0;pointer-events:none}
   .readout{flex:0 0 auto;display:flex;justify-content:space-between;padding:9px 18px;color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;border-top:1px solid var(--line);background:var(--panel)}
@@ -354,6 +370,7 @@
           <button class="pill" id="hlBtn" title="Cycle how the part being read is highlighted (off / underline / gray)">Highlight: Off</button>
           <button class="pill" id="repeatBtn" title="Repeat each block 0, 1, or 2 extra times">Repeat: Off</button>
           <button class="pill" id="tintBtn" title="Colour the French fragments so the language switching is visible">Tint: Off</button>
+          <button class="pill" id="viewBtn" title="Show the whole chapter instead of one block at a time. Reading is unchanged.">View: Block</button>
           <button class="pill" id="exModeBtn" title="At each exercise question, stop and let you type an answer, then show the book&#39;s">Exercise: Off</button>
           <button class="pill" id="autoNextBtn" title="When a chapter ends, roll straight into the next one instead of stopping">Auto&#8209;chapter: On</button>
         </div>
@@ -910,6 +927,27 @@
      and the attempt still recorded — the panel just says so plainly instead
      of inventing one. */
   var exMode=false;
+  // Whether to put the cursor in the answer box automatically. 'ontouchstart'
+  // in window is NOT the test for this: plenty of desktop machines with a
+  // touchscreen define it, and on those the box would never be focused and the
+  // keyboard-only flow would quietly stop working. A coarse pointer is the
+  // actual question — that is the case where auto-focus throws an on-screen
+  // keyboard over the text.
+  function prefersAutoFocus(){
+    try{
+      if(window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return false;
+    }catch(e){}
+    return true;
+  }
+  // One shared focus timer. Asking a question focuses the answer box after a
+  // moment; checking an answer focuses Next. Without a single handle the first
+  // timer fires after the second and drags focus back to a box the reader has
+  // already finished with, which breaks the type / Enter / Enter loop.
+  var exFocusTimer=null;
+  function focusLater(getEl, ms){
+    clearTimeout(exFocusTimer);
+    exFocusTimer=setTimeout(function(){ try{ var el=getEl(); if(el) el.focus(); }catch(e){} }, ms);
+  }
   var exByBlock=null;     // blockIdx -> [items], built when a chapter loads
   var exActive=null;      // the item being asked right now
   var exAwaiting=false;   // true while the panel has the floor
@@ -970,7 +1008,8 @@
     $('exPanel').classList.add('on');
     // Don't steal focus on a touch device — the on-screen keyboard springing
     // up over the text is worse than one extra tap.
-    if(!('ontouchstart' in window)) setTimeout(function(){ $('exInput').focus(); }, 60);
+    if(prefersAutoFocus()) focusLater(function(){ return $('exInput'); }, 60);
+    else clearTimeout(exFocusTimer);
     onPlaybackStateChanged();
   }
   function escapeHtmlJs(s){
@@ -999,6 +1038,11 @@
     $('exCompare').style.display='flex';
     $('exNext').style.display='';
     $('exSkip').style.display='none';
+    // Move focus to Next so the whole exercise can be worked through from the
+    // keyboard: the input is hidden at this point, so without this the focus
+    // falls back to the body. Unconditional — focusing a button opens no
+    // on-screen keyboard, so there is nothing for a touch device to object to.
+    focusLater(function(){ return $('exNext'); }, 30);
     exDone++;
     $('exProgress').textContent = exDone+' / '+exTotal;
     // Read the book's answer, in its own language(s).
@@ -1038,7 +1082,28 @@
   // Enter checks the answer; Shift+Enter is a newline, for the longer writing
   // tasks where an answer runs to several sentences.
   $('exInput').addEventListener('keydown', function(e){
-    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); submitExercise(); }
+    if(e.key==='Enter' && !e.shiftKey){
+      e.preventDefault();
+      // Stop the keystroke here. The document-level handler below also acts on
+      // Enter, and by the time the event reached it the answer would already
+      // be showing — so one press would check AND skip straight past to the
+      // next question.
+      e.stopPropagation();
+      submitExercise();
+    }
+  });
+  // ...and Enter again moves to the next question, so a whole exercise can be
+  // done without touching the mouse: type, Enter to check, Enter to go on.
+  // This listens on the document rather than on a control because after
+  // checking, the input is hidden and focus may be nowhere in particular.
+  // The input's own handler owns Enter while typing, so that case is skipped
+  // here to avoid checking and advancing on one keystroke.
+  document.addEventListener('keydown', function(e){
+    if(!exAwaiting || e.key!=='Enter' || e.shiftKey) return;
+    if(e.target && e.target.id==='exInput') return;   // handled above
+    e.preventDefault();
+    if($('exCompare').style.display !== 'none') $('exNext').click();
+    else submitExercise();
   });
 
   /* ==========================================================================
@@ -1084,28 +1149,91 @@
     renderBlock();
   }
 
-  function renderBlock(){
-    var inner=$('textInner'); inner.innerHTML='';
-    var b=blocks[idx];
-    if(!b){ $('pos').textContent=0; $('total').textContent=0; $('mixNote').textContent=''; $('playBtn').textContent='\u25b6'; return; }
-    var el=document.createElement('div');
-    el.id='blockEl';
-    el.className='mixBlock'
+  /* ---- rendering ----
+     Two modes behind one function. In block mode the stage holds exactly the
+     block being read, as before. In chapter mode it holds every block, built
+     once per chapter and then left alone — moving from one block to the next
+     only moves the id and the accent bar and scrolls, so a long chapter isn't
+     rebuilt on every sentence and the reader's scroll position survives.
+
+     Whichever mode is on, the current block carries id="blockEl". That is what
+     keeps the rest of the player unchanged: highlightUnit, clearHighlight and the exercise lookups all reach the right block through it
+     without knowing which view they are in. */
+  var viewAll=false, renderedBlocks=null, renderedMode=null;
+
+  function blockClass(b){
+    return 'mixBlock'
       + (b.type==='heading' ? (' mixHeading lvl'+(b.level||3)) : '')
       + (b.type==='table' ? ' mixTableWrap' : '')
       + (b.type==='art' ? ' mixArt' : '')
       + (b.quote ? ' mixQuote' : '');
+  }
+  function makeBlockEl(b, i){
+    var el=document.createElement('div');
+    el.className=blockClass(b);
+    el.setAttribute('data-blk', i);
     // The HTML already contains the .ttsSeg spans, so it goes in as-is — no
-    // DOM walking or sentence-guessing at render time (the parallel-text app
-    // has to do that because its source blocks are plain paragraphs).
+    // DOM walking or sentence-guessing at render time.
     el.innerHTML=b.html||'';
-    inner.appendChild(el);
+    return el;
+  }
+  // Move id="blockEl" and the accent onto the block now being read.
+  function markCurrent(scroll){
+    var prev=$('blockEl');
+    if(prev){ prev.removeAttribute('id'); prev.classList.remove('isCurrent'); }
+    var el=$('textInner').querySelector('[data-blk="'+idx+'"]');
+    if(!el) return;
+    el.id='blockEl';
+    el.classList.add('isCurrent');
+    if(scroll && viewAll && el.scrollIntoView){
+      try{ el.scrollIntoView({ block:'center', behavior:'auto' }); }catch(e){}
+    }
+  }
+  function renderBlock(){
+    var inner=$('textInner');
+    var b=blocks[idx];
+    if(!b){
+      inner.innerHTML=''; renderedBlocks=null; renderedMode=null;
+      $('pos').textContent=0; $('total').textContent=0;
+      $('mixNote').textContent='';
+      $('playBtn').textContent='\u25b6';
+      return;
+    }
+    var mode = viewAll ? 'all' : 'one';
+    if(renderedBlocks!==blocks || renderedMode!==mode){
+      inner.innerHTML='';
+      if(viewAll){
+        var frag=document.createDocumentFragment();
+        blocks.forEach(function(bb,i){ frag.appendChild(makeBlockEl(bb,i)); });
+        inner.appendChild(frag);
+      } else {
+        inner.appendChild(makeBlockEl(b, idx));
+      }
+      renderedBlocks=blocks; renderedMode=mode;
+      $('textDisplay').scrollTop=0;
+    } else if(!viewAll){
+      // Block mode: one element, replaced each time.
+      inner.innerHTML='';
+      inner.appendChild(makeBlockEl(b, idx));
+      $('textDisplay').scrollTop=0;
+    }
+    markCurrent(true);
     $('pos').textContent=blocks.length?idx+1:0;
     $('total').textContent=blocks.length;
     updateMixNote();
     $('playBtn').textContent=(playing && !paused)?'\u275a\u275a':'\u25b6';
-    $('textDisplay').scrollTop=0;
   }
+  function applyViewBtn(){
+    $('viewBtn').textContent='View: '+(viewAll?'Chapter':'Block');
+    $('textDisplay').classList.toggle('viewAll', viewAll);
+  }
+  $('viewBtn').addEventListener('click', function(){
+    viewAll=!viewAll;
+    applyViewBtn();
+    renderedMode=null;           // force a rebuild in the new mode
+    renderBlock();
+  });
+  applyViewBtn();
   // Small readout showing what's in this block and what will actually be
   // spoken — useful when one of the language toggles is off, since the text on
   // screen looks unchanged but half of it has gone silent.
@@ -1371,8 +1499,13 @@
   }
   function toggle(){
     // While a question is on screen the panel owns playback; the way forward
-    // is Check / Next / Skip, not the play button.
-    if(exAwaiting){ if(!('ontouchstart' in window)) $('exInput').focus(); return; }
+    // is Check / Next / Skip, not the play button. Space therefore does what
+    // Enter does here, rather than nothing at all.
+    if(exAwaiting){
+      if($('exCompare').style.display !== 'none') $('exNext').click();
+      else if(prefersAutoFocus()) $('exInput').focus();
+      return;
+    }
     if(!playing){ play(false); }
     else if(paused){ resumeReading(); }
     else { pauseReading(); }
