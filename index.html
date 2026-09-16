@@ -189,6 +189,42 @@
      it makes the code-switching visible at a glance when learning. */
   .stage[data-tint="on"] .ttsSeg[data-lang="fr"]{color:var(--frTint)}
 
+
+  /* ===== exercise mode =====
+     A panel that takes over the bottom of the stage when playback reaches a
+     question. It sits OUTSIDE #textDisplay so its taps never reach the
+     double-tap navigation zones, and the text of the exercise stays visible
+     above it. */
+  .exPanel{position:absolute;left:0;right:0;bottom:0;z-index:10;
+    background:var(--panel);border-top:2px solid var(--accent);
+    padding:12px 14px 14px;display:none;flex-direction:column;gap:9px;
+    max-height:72%;overflow-y:auto;color:var(--text)}
+  .exPanel.on{display:flex}
+  .exTag{font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--accent);font-weight:700}
+  .exQ{font-size:15px;line-height:1.45;font-weight:600}
+  .exQ .exNum{color:var(--dim);font-weight:700;margin-right:5px}
+  .exRow{display:flex;gap:8px;align-items:stretch}
+  .exPanel textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;
+    background:var(--bg);border:1px solid var(--line);border-radius:10px;
+    color:var(--text);padding:10px;font-size:15px;font-family:inherit;line-height:1.35}
+  .exPanel textarea:focus{outline:none;border-color:var(--accent)}
+  .exBtn{padding:10px 15px;border-radius:10px;background:var(--accent);color:#fff;
+    font-weight:600;font-size:14px;white-space:nowrap}
+  .exBtn.ghost{background:var(--bg);border:1px solid var(--line);color:var(--dim);font-weight:500}
+  .exBtn:active{transform:translateY(1px)}
+  .exCompare{display:flex;flex-direction:column;gap:8px}
+  .exCard{border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:var(--bg)}
+  .exCard h4{font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--dim);font-weight:700;margin-bottom:4px}
+  .exCard .body{font-size:15px;line-height:1.45;white-space:pre-wrap}
+  .exCard.book{border-color:var(--accent)}
+  .exCard.empty .body{color:var(--dim);font-style:italic}
+  .exSame{font-size:11.5px;color:var(--dim)}
+  .exFoot{display:flex;gap:8px;align-items:center}
+  .exProgress{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;margin-left:auto}
+  @media (max-width:420px){
+    .exPanel{padding:10px 11px 12px;max-height:80%}
+    .exQ{font-size:14px}
+  }
   .controls{display:flex;flex-direction:column;flex:0 0 auto;transition:opacity .2s,max-height .2s;overflow:hidden}
   .controls.hidden{max-height:0;opacity:0;pointer-events:none}
   .readout{flex:0 0 auto;display:flex;justify-content:space-between;padding:9px 18px;color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;border-top:1px solid var(--line);background:var(--panel)}
@@ -318,12 +354,33 @@
           <button class="pill" id="hlBtn" title="Cycle how the part being read is highlighted (off / underline / gray)">Highlight: Off</button>
           <button class="pill" id="repeatBtn" title="Repeat each block 0, 1, or 2 extra times">Repeat: Off</button>
           <button class="pill" id="tintBtn" title="Colour the French fragments so the language switching is visible">Tint: Off</button>
+          <button class="pill" id="exModeBtn" title="At each exercise question, stop and let you type an answer, then show the book&#39;s">Exercise: Off</button>
           <button class="pill" id="autoNextBtn" title="When a chapter ends, roll straight into the next one instead of stopping">Auto&#8209;chapter: On</button>
         </div>
       </div>
       <button class="pill icon hideToggle" id="hideBtn" title="Hide all controls">⤢</button>
       <div class="chapterToast" id="chapterToast"></div>
       <div class="textDisplay" id="textDisplay"><div class="inner" id="textInner"></div></div>
+      <div class="exPanel" id="exPanel">
+        <div class="exTag" id="exTag">Exercise</div>
+        <div class="exQ" id="exQ"></div>
+        <div class="exRow" id="exAskRow">
+          <textarea id="exInput" rows="1" placeholder="Type your answer, then Enter…"
+            autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+          <button class="exBtn" id="exSubmit">Check</button>
+        </div>
+        <div class="exCompare" id="exCompare" style="display:none">
+          <div class="exCard"><h4>Your answer</h4><div class="body" id="exYours"></div></div>
+          <div class="exCard book"><h4>The book&rsquo;s answer</h4><div class="body" id="exBook"></div></div>
+          <div class="exSame" id="exSame" style="display:none"></div>
+        </div>
+        <div class="exFoot">
+          <button class="exBtn" id="exNext" style="display:none">Next &rsaquo;</button>
+          <button class="exBtn ghost" id="exSkip">Skip</button>
+          <button class="exBtn ghost" id="exOff">Exit exercise mode</button>
+          <span class="exProgress" id="exProgress"></span>
+        </div>
+      </div>
       <div class="cpanel" id="cpanel">
         <h3>Colours</h3>
         <div class="presets" id="presets">
@@ -464,7 +521,7 @@
     if(!c){ $('err').textContent='Chapter not found.'; return; }
     currentBook=b; currentChapterIdx=ci; updateChapterNavUI();
     $('err').textContent='';
-    loadBlocks(c.blocks);
+    loadBlocks(c.blocks, c);
     syncChapterSelect();
     updateMediaSessionMetadata();
     flashChapter(b.chapters[ci]);
@@ -829,6 +886,161 @@
     else { stopSilentAudio(); if(!playing) releaseWakeLock(); }
   }
 
+
+  /* ==========================================================================
+     EXERCISE MODE
+     ==========================================================================
+     With this on, playback stops at each exercise question, takes a typed
+     attempt, then shows and reads out the answer THE BOOK gives — never a
+     judgement of its own. Nothing is graded: the two answers are put side by
+     side and the reader decides. (Marking free-form French right or wrong
+     would be guesswork dressed up as authority, and these exercises routinely
+     accept several forms — the answer keys themselves print alternatives
+     separated by "/".)
+
+     The pairing is done at build time; see the exercise pass in
+     build_books_mixed.js. Each chapter may carry an `exercises` array, and
+     each item in it says which block and which SEGMENT RANGE its question
+     occupies. That is what lets the question be read in the normal flow,
+     with its own voices, rather than lifted out into a quiz widget: playback
+     runs as usual until it finishes the last segment of a question, and only
+     then does the panel appear.
+
+     Where the book gives no answer for an item, the question is still asked
+     and the attempt still recorded — the panel just says so plainly instead
+     of inventing one. */
+  var exMode=false;
+  var exByBlock=null;     // blockIdx -> [items], built when a chapter loads
+  var exActive=null;      // the item being asked right now
+  var exAwaiting=false;   // true while the panel has the floor
+  var exTotal=0, exDone=0;
+
+  function applyExModeBtn(){
+    $('exModeBtn').textContent = 'Exercise: ' + (exMode ? 'On' : 'Off');
+  }
+  $('exModeBtn').addEventListener('click', function(){
+    exMode=!exMode;
+    applyExModeBtn();
+    if(!exMode) closeExercise(true);
+    updateMixNote();
+  });
+  $('exOff').addEventListener('click', function(){
+    exMode=false; applyExModeBtn(); closeExercise(true); updateMixNote();
+  });
+  applyExModeBtn();
+
+  // Index the current chapter's exercises by block, so playback can ask
+  // "does a question start at this segment?" cheaply.
+  function buildExerciseIndex(chapter){
+    exByBlock=null; exTotal=0; exDone=0;
+    var sets=(chapter && chapter.exercises) || [];
+    if(!sets.length) return;
+    exByBlock={};
+    sets.forEach(function(set){
+      (set.items||[]).forEach(function(it){
+        var rec={ set:set, n:it.n, block:it.block, from:it.from, to:it.to,
+                  q:it.q, a:it.a, aHtml:it.aHtml, aSegs:it.aSegs };
+        (exByBlock[it.block] || (exByBlock[it.block]=[])).push(rec);
+        exTotal++;
+      });
+    });
+    Object.keys(exByBlock).forEach(function(k){
+      exByBlock[k].sort(function(a,b){ return a.from-b.from; });
+    });
+  }
+  function exerciseItemAt(blockIdx, segIdx){
+    if(!exMode || !exByBlock) return null;
+    var list=exByBlock[blockIdx]; if(!list) return null;
+    for(var i=0;i<list.length;i++) if(list[i].from===segIdx) return list[i];
+    return null;
+  }
+
+  function askExercise(){
+    exAwaiting=true;
+    var it=exActive;
+    $('exTag').textContent = it.set.title ? it.set.title : 'Exercise';
+    $('exQ').innerHTML = '<span class="exNum">'+it.n+'.</span>' +
+      escapeHtmlJs(it.q.replace(/^\s*\d+\s*[.)]\s*/, ''));
+    $('exCompare').style.display='none';
+    $('exAskRow').style.display='flex';
+    $('exNext').style.display='none';
+    $('exSkip').style.display='';
+    $('exProgress').textContent = (exDone+1)+' / '+exTotal;
+    $('exInput').value='';
+    $('exPanel').classList.add('on');
+    // Don't steal focus on a touch device — the on-screen keyboard springing
+    // up over the text is worse than one extra tap.
+    if(!('ontouchstart' in window)) setTimeout(function(){ $('exInput').focus(); }, 60);
+    onPlaybackStateChanged();
+  }
+  function escapeHtmlJs(s){
+    return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function submitExercise(){
+    if(!exActive || !exAwaiting) return;
+    var it=exActive;
+    var typed=$('exInput').value;
+    $('exAskRow').style.display='none';
+    $('exYours').textContent = typed.trim() ? typed : '(nothing typed)';
+    var bookCard=$('exBook').parentNode;
+    if(it.a){
+      $('exBook').innerHTML = it.aHtml || escapeHtmlJs(it.a);
+      bookCard.classList.remove('empty');
+    } else {
+      $('exBook').textContent = 'This book doesn\u2019t print an answer for this one.';
+      bookCard.classList.add('empty');
+    }
+    // A neutral observation, not a grade: identical strings are worth
+    // pointing out, anything else is for the reader to judge.
+    var same = it.a && normalizeAnswer(typed) && normalizeAnswer(typed)===normalizeAnswer(it.a);
+    $('exSame').style.display = same ? '' : 'none';
+    if(same) $('exSame').textContent = 'Identical to the book\u2019s answer.';
+    $('exCompare').style.display='flex';
+    $('exNext').style.display='';
+    $('exSkip').style.display='none';
+    exDone++;
+    $('exProgress').textContent = exDone+' / '+exTotal;
+    // Read the book's answer, in its own language(s).
+    if(it.aSegs && it.aSegs.length) speakAnswer(it.aSegs.slice());
+  }
+  function normalizeAnswer(s){
+    return String(s||'').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+  }
+  // Speaks the answer's segments one after another, honouring the per-language
+  // voice and speed, and completely outside the block player's state so it
+  // can't disturb where playback will resume.
+  function speakAnswer(queue){
+    if(!hasTTS || !queue.length) return;
+    var seg=queue.shift();
+    if(!langEnabled[seg.lang]){ speakAnswer(queue); return; }
+    var u=new SpeechSynthesisUtterance(seg.text);
+    applyVoiceSettings(u, seg.lang);
+    u.onend=u.onerror=function(){ if(exAwaiting) speakAnswer(queue); };
+    try{ window.speechSynthesis.speak(u); }catch(e){}
+  }
+
+  // Leave the panel and let the book carry on from just after the question.
+  function closeExercise(silent){
+    if(!exAwaiting && !exActive){ $('exPanel').classList.remove('on'); return; }
+    exAwaiting=false; exActive=null;
+    $('exPanel').classList.remove('on');
+    if(hasTTS){ try{ window.speechSynthesis.cancel(); }catch(e){} }
+    if(!silent && playing){ paused=false; lastSpokenLang=null; runUnit(); }
+    updatePlayBtnIcon();
+    onPlaybackStateChanged();
+  }
+  $('exSubmit').addEventListener('click', submitExercise);
+  $('exNext').addEventListener('click', function(){ closeExercise(false); });
+  $('exSkip').addEventListener('click', function(){ exDone++; closeExercise(false); });
+  // Enter checks the answer; Shift+Enter is a newline, for the longer writing
+  // tasks where an answer runs to several sentences.
+  $('exInput').addEventListener('keydown', function(e){
+    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); submitExercise(); }
+  });
+
   /* ==========================================================================
      BLOCK PLAYER
      ==========================================================================
@@ -860,14 +1072,15 @@
   // needs this: the old loadBlocks() called stop() first, which is right when
   // a person picks a chapter by hand but would kill the audio at exactly the
   // moment continuous listening is supposed to carry on.
-  function setBlocks(list){
+  function setBlocks(list, chapter){
     blocks=list||[]; idx=0;
+    buildExerciseIndex(chapter);
     $('setup').style.display='none';
     $('reader').classList.add('on'); $('reader').style.display='flex';
   }
-  function loadBlocks(list){
+  function loadBlocks(list, chapter){
     stop();
-    setBlocks(list);
+    setBlocks(list, chapter);
     renderBlock();
   }
 
@@ -907,7 +1120,9 @@
     var muted=[];
     if(nFr && !langEnabled.fr) muted.push('fr');
     if(nEn && !langEnabled.en) muted.push('en');
-    note.textContent = parts.join(' + ') + (muted.length ? ' (' + muted.join('/') + ' muted)' : '');
+    var tail = muted.length ? ' (' + muted.join('/') + ' muted)' : '';
+    if(exTotal) tail += exMode ? '  \u00b7 ' + exTotal + ' questions' : '  \u00b7 ' + exTotal + ' questions available';
+    note.textContent = parts.join(' + ') + tail;
   }
   function updatePlayBtnIcon(){ $('playBtn').textContent=(playing && !paused)?'\u275a\u275a':'\u25b6'; }
 
@@ -975,9 +1190,12 @@
   }
 
   function runUnit(){
-    if(!playing || paused) return;
+    if(!playing || paused || exAwaiting) return;
     var unit=units && units[unitIdx];
     if(!unit){ blockFinished(); return; }
+    // Entering a question: note it now, read it through as normal prose, and
+    // hand over to the panel once its last segment has been spoken.
+    if(exMode && !exActive) exActive = exerciseItemAt(idx, unit.i);
     highlightUnit(unit);
     if(!hasTTS){ startFallbackTimer(durationForUnit(unit), unitDone); return; }
     // The gap goes in only at an actual language switch, so ordinary prose
@@ -994,6 +1212,18 @@
   function unitDone(){
     if(!playing || paused) return;
     unitIdx++;
+    if(exActive && !exAwaiting){
+      var next = units && units[unitIdx];
+      // The question is finished once the next unit is past its segment range
+      // (or the block has run out). Playback stays "playing" but parked here,
+      // so resuming carries on from the segment after the question.
+      if(!next || next.i > exActive.to){
+        paused=true;
+        updatePlayBtnIcon();
+        askExercise();
+        return;
+      }
+    }
     runUnit();
   }
   // Every segment of the block has been read. Repeat it if repeats are owed,
@@ -1062,7 +1292,7 @@
     var content=bookCache[currentBook.id];
     if(content && content.chapters && content.chapters[next]){
       currentChapterIdx=next;
-      setBlocks(content.chapters[next].blocks);
+      setBlocks(content.chapters[next].blocks, content.chapters[next]);
       renderBlock();
       syncChapterSelect();
       updateMediaSessionMetadata();
@@ -1100,6 +1330,8 @@
     runCurrentBlock();
   }
   function stop(){
+    exAwaiting=false; exActive=null;
+    var ep=$('exPanel'); if(ep) ep.classList.remove('on');
     playing=false; paused=false; activeChunk=null;
     units=null; unitIdx=0; repeatsLeft=0; lastSpokenLang=null;
     clearTimeout(gapTimer);
@@ -1138,6 +1370,9 @@
     onPlaybackStateChanged();
   }
   function toggle(){
+    // While a question is on screen the panel owns playback; the way forward
+    // is Check / Next / Skip, not the play button.
+    if(exAwaiting){ if(!('ontouchstart' in window)) $('exInput').focus(); return; }
     if(!playing){ play(false); }
     else if(paused){ resumeReading(); }
     else { pauseReading(); }
@@ -1157,6 +1392,9 @@
     mainDown:function(){changeScale(-SCALE_STEP);}, mainUp:function(){changeScale(SCALE_STEP);}, fontReset:resetFontScale};
   document.addEventListener('click',function(e){ var el=e.target.closest('[data-act]'); if(el&&actions[el.dataset.act])actions[el.dataset.act](); });
   document.addEventListener('keydown',function(e){ if(!$('reader').classList.contains('on'))return;
+    // Space must not toggle playback while an answer is being typed.
+    var t=e.target, tag=t&&t.tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||(t&&t.isContentEditable)) return;
     if(e.code==='Space'){e.preventDefault();toggle();}
     else if(e.code==='ArrowLeft')prevBlock(); else if(e.code==='ArrowRight')nextBlock();
     // Wired-headphone / keyboard media keys (desktop OSes surface a headset's

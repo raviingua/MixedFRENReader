@@ -750,7 +750,7 @@ const BOX_DRAWING = /[\u2500-\u257F]/;
 // stay individually highlightable and never merge into one another.
 function buildParagraphBlock(lines, isQuote){
   const segs = [], counter = { n:0 };
-  const htmlLines = [];
+  const htmlLines = [], lineMap = [];
   let seed = null;
   const isArt = lines.some(l => BOX_DRAWING.test(l));
   for(const rawLine of lines){
@@ -780,12 +780,19 @@ function buildParagraphBlock(lines, isQuote){
       continue;
     }
     seed = lineSegs[lineSegs.length - 1].lang;
+    const segFrom = counter.n;
     htmlLines.push(prefix + renderSegs(lineSegs, counter, segs));
+    // Remember which segments came from which source line. The exercise pass
+    // needs this to point the reader at one question inside a block that
+    // holds a whole numbered list, and it is deleted again before output.
+    lineMap.push({ raw: line, segFrom: segFrom, segTo: counter.n - 1 });
   }
   if(!segs.length) return null;
-  return isArt
+  const block = isArt
     ? { type:'art', quote: isQuote || undefined, html: htmlLines.join('\n'), segs: segs }
     : { type:'p',   quote: isQuote || undefined, html: htmlLines.join('<br>'), segs: segs };
+  block._lines = lineMap;
+  return block;
 }
 
 function buildHeadingBlock(lines, level){
@@ -872,15 +879,21 @@ function buildTableBlock(rawLines, isQuote){
   let html = '<table class="mixTable"><thead><tr>';
   header.forEach((c,i) => { html += cellHtml(c, i, 'th'); });
   html += '</tr></thead><tbody>';
+  const rowMap = [];
   body.forEach(r => {
+    const segFrom = counter.n;
     html += '<tr>';
     for(let c = 0; c < nCols; c++) html += cellHtml(r[c] || '', c, 'td');
     html += '</tr>';
+    rowMap.push({ cells: r.slice(), segFrom: segFrom, segTo: counter.n - 1 });
   });
   html += '</tbody></table>';
 
   if(!segs.length) return null;
-  return { type:'table', quote: isQuote || undefined, html: html, segs: segs };
+  const block = { type:'table', quote: isQuote || undefined, html: html, segs: segs };
+  block._header = header.slice();
+  block._rows = rowMap;
+  return block;
 }
 
 // ============================== book extraction ==============================
@@ -941,7 +954,8 @@ function extractBook(file){
     // "## Vocabulaire du Chapitre" is identical in every chapter, so it gets
     // the parent "#" heading prefixed to stay distinguishable in the picker.
     const full = (level === 2 && h1) ? (h1 + ' \u2014 ' + text) : text;
-    cur = { title: full, own: text, titleLines: [text], level: level, blocks: [] };
+    cur = { title: full, own: text, titleLines: [text], level: level,
+            h1: (level === 1 ? text : h1), blocks: [] };
     chapters.push(cur);
     chapterOpenForMerge = true;
     lastHeadingBlock = null;
@@ -1077,6 +1091,336 @@ function extractBook(file){
   return { title, source: path.basename(file), chapters: kept };
 }
 
+/* ===========================================================================
+ * EXERCISE MODE: pairing questions with the book's own answers
+ * ===========================================================================
+ * The reader's exercise mode reads a question, waits for the person to type
+ * their attempt, then reads out the answer THE BOOK GIVES. That only works if
+ * the two can be matched at build time, because they are never next to each
+ * other: questions sit in an exercise section and answers in a separate
+ * answer-key section, which this builder has already turned into a different
+ * chapter.
+ *
+ * The governing principle is that a confidently WRONG answer is much worse
+ * than no answer. An early version of this pass paired a vocabulary-matching
+ * exercise with the answers to a true/false comprehension quiz — every answer
+ * plausible, every answer wrong. So a pairing is only made on an explicit key
+ * that both sides carry, and only when exactly one candidate fits. Anything
+ * else is left unmatched and the reader says so.
+ *
+ * These books use three keying schemes:
+ *
+ *   1. AN ORDINAL on both sides (the TEF drills, the Café des Langues keys):
+ *        ### Drill 2: Translation Sprint      ### Drill 2 Answers
+ *        ### Exercice 1 : Complétez…          **Exercice 1 :**
+ *      The answer label may be a bold paragraph line rather than a heading,
+ *      and it sits in the SAME block as the answers it introduces, so labels
+ *      are recognised mid-block.
+ *
+ *   2. A LETTER plus a section name (the graded readers):
+ *        ## Exercices de vocabulaire          ## Les réponses
+ *        ### A. Associez les mots…            ### Vocabulaire A - Associez
+ *        ### B. Complétez les phrases…        ### Vocabulaire B - Complétez
+ *      The letter comes from the question heading and the section name from
+ *      the question's CHAPTER, matched against the answer heading's two parts.
+ *
+ *   3. NEITHER, for a test numbered straight through (Mini TEF practice
+ *      tests):
+ *        ## 📝 Mini TEF Practice Test         ## 📋 Answer Key & Explanations
+ *        **1.** Quel temps fera-t-il lundi ?  | 1 | B | "Lundi, il pleuvra…" |
+ *      Here the only evidence is adjacency, so the bar is higher: the
+ *      question group must announce itself as an exercise, the answer group
+ *      must be the nearest un-keyed one after it, and EVERY question number
+ *      must appear in it.
+ *
+ * Matching never crosses a "#" boundary. Every chapter of every one of these
+ * books has an "Exercice 1"; without that scope Chapter 1's questions would
+ * cheerfully pair with Chapter 9's answers.
+ */
+
+// A heading or label that introduces answers. Always tested FIRST, because
+// "Drill 2 Answers" and "🔑 Réponses aux exercices" match both patterns.
+const ANS_HEADING = /\b(answers?|answer\s*keys?|r[ée]ponses?|corrig[ée]s?|solutions?|mod[èe]les?)\b/i;
+// A heading that announces questions. Deliberately narrow: bare "practice",
+// "part" and "test" are not enough, or "💬 Dialogue Practice" and
+// "Partie 1 : Les Premiers Pas" get treated as exercise sections.
+const EX_HEADING = /\b(exercices?|exercises?|drills?|quiz|practice\s+tests?|test\s+blanc|examen\s+blanc)\b/i;
+// "Exercice 3", "Drill 2", "Exercise 10" — the ordinal of scheme 1.
+const EX_ORDINAL = /\b(exercices?|exercises?|drills?|activit[ée]s?|activity)\s*(?:n[°o]\s*)?(\d+)/i;
+// "A. Associez…", "B) Complétez…", "F. Registre et style" — scheme 2's
+// letter. The range runs to J because the graded readers go up to F and
+// stopping at E silently dropped those groups into the un-keyed fallback.
+const EX_LETTER = /^\s*(?:\*\*)?([A-J])\s*[.)]\s/;
+// A numbered item, with the "**1.**" bolding the practice tests use.
+const ITEM_RE = /^\s*(?:\*\*)?(\d+)\s*[.)]\s*(?:\*\*)?\s*(.*)$/;
+// A bold-only line acting as a group label: "**Exercice 1 :**"
+const BOLD_LABEL_RE = /^\s*\*\*(.+?)\*\*\s*:?\s*$/;
+
+// "exercice" and "exercise" are the same word in two languages and the books
+// use both for the same exercise, so the kind is normalised before matching.
+function exKind(text){
+  const m = EX_ORDINAL.exec(text || '');
+  if(!m) return null;
+  const w = m[1].toLowerCase();
+  return { kind: /^exerc/.test(w) ? 'ex' : /^drill/.test(w) ? 'drill' : 'act',
+           num: parseInt(m[2], 10) };
+}
+function groupKey(g){ return g ? g.kind + ':' + g.num : null; }
+function letterOf(text){ const m = EX_LETTER.exec(text || ''); return m ? m[1].toUpperCase() : null; }
+
+// Significant words of a section name, accent-stripped, for comparing
+// "Exercices de vocabulaire" with "Vocabulaire A - Associez".
+const SECTION_STOP = new Set(['de','du','des','la','le','les','un','une','et','aux','au',
+  'the','of','and','for','with','your','chapter','chapitre','partie','part']);
+function sectionWords(text){
+  const t = speechText(String(text || '')).toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  return new Set((t.match(/[a-z]{3,}/g) || []).filter(w => !SECTION_STOP.has(w)));
+}
+function wordsOverlap(a, b){ for(const w of a) if(b.has(w)) return true; return false; }
+
+// An answer heading of scheme 2 splits into a section and an optional letter:
+// "Vocabulaire A - Associez" -> section "Vocabulaire", letter "A".
+// "Grammaire - Pratique"     -> section "Grammaire",   letter null.
+function answerLabelParts(label){
+  const m = /^(.*?)\s*[-\u2013\u2014]\s*(.*)$/.exec(label || '');
+  let left = m ? m[1] : (label || '');
+  let letter = null;
+  const lm = /\s([A-J])$/.exec(left.trim());
+  if(lm){ letter = lm[1].toUpperCase(); left = left.trim().slice(0, -1); }
+  return { section: left, letter: letter };
+}
+
+// Pull numbered items out of a block's lines. A line that isn't numbered
+// continues the item above it — which is how multiple-choice options
+// ("A) Il fera beau") stay attached to their question instead of becoming
+// items of their own.
+function itemsFromLines(lines, blockIdx, onLabel){
+  const out = [];
+  let cur = null;
+  for(const ln of lines){
+    const lab = BOLD_LABEL_RE.exec(ln.raw);
+    if(lab && onLabel){ onLabel(lab[1]); cur = null; continue; }
+    const m = ITEM_RE.exec(ln.raw);
+    if(m){
+      cur = { num: parseInt(m[1], 10), blockIdx: blockIdx,
+              segFrom: ln.segFrom, segTo: ln.segTo, lines: [ln.raw] };
+      out.push(cur);
+    } else if(cur){
+      cur.segTo = Math.max(cur.segTo, ln.segTo);
+      cur.lines.push(ln.raw);
+    }
+  }
+  return out;
+}
+
+// Drill tables ("| 1 | je / manger | |") and answer tables ("| 1 | B | … |")
+// are both keyed by a numeric first column. Any other table in an exercise
+// section — a word bank, a conjugation chart — is reference material, not
+// questions, so the header has to look like a question grid.
+function itemsFromTable(block, blockIdx){
+  const h0 = ((block._header && block._header[0]) || '').replace(/\*/g,'').trim();
+  if(!/^(#|n[\u00b0o]\.?|no\.?|question|q)$/i.test(h0)) return [];
+  const out = [];
+  for(const row of (block._rows || [])){
+    const first = (row.cells[0] || '').replace(/\*/g,'').trim();
+    if(!/^\d+$/.test(first)) continue;
+    out.push({ num: parseInt(first, 10), blockIdx: blockIdx,
+               segFrom: row.segFrom, segTo: row.segTo,
+               lines: [row.cells.slice(1).filter(c => c && c.trim()).join(' \u2014 ')] });
+  }
+  return out;
+}
+
+function htmlToText(html){
+  return speechText(String(html || '').replace(/<br\s*\/?>/gi, ' '));
+}
+
+// Split one chapter into groups, each introduced by a heading or bold label.
+// `allowLabels` is set only for answer chapters, where "**Exercice 1 :**"
+// genuinely introduces a group. In a question chapter a bold line is just
+// emphasis — "**Soutenu :**" inside a register-transformation exercise — and
+// treating it as a group boundary chopped one exercise into a set per item.
+function collectGroups(chapter, allowLabels){
+  const groups = [];
+  let cur = null;
+  function open(label){
+    cur = { label: label, ord: exKind(label), letter: letterOf(label),
+            isAnswers: ANS_HEADING.test(label), items: [], extra: [] };
+    groups.push(cur);
+    return cur;
+  }
+  chapter.blocks.forEach((bl, i) => {
+    if(bl.type === 'heading'){ open(htmlToText(bl.html)); return; }
+    if(!cur) open(chapter.own || chapter.title || '');
+    if(bl.type === 'p'){
+      const items = itemsFromLines(bl._lines || [], i, allowLabels ? open : null);
+      if(items.length) cur.items.push(...items);
+      else cur.extra.push({ text: htmlToText(bl.html) });
+      return;
+    }
+    if(bl.type === 'table'){
+      const items = itemsFromTable(bl, i);
+      if(items.length) cur.items.push(...items);
+      return;
+    }
+  });
+  return groups;
+}
+
+// Build the display + speech form of one answer. An answer can itself be
+// bilingual ("Bonne nuit ! / Good night!"), so the reader gets per-fragment
+// language tags rather than one language for the lot.
+function answerPayload(lines){
+  const raw = lines.join(' ').replace(/\s+/g,' ').trim();
+  const segs = segmentLine(raw, null);
+  return {
+    html: segs.map(s => s.html).join('') || escapeHtml(raw),
+    segs: segs.filter(s => s.text && s.text.trim()).map(s => ({ lang: s.lang, text: s.text })),
+    text: segs.map(s => s.text).filter(Boolean).join(' ')
+  };
+}
+// Strip the leading "1." from an answer so it isn't read back as a number;
+// keep it on the question, where it is the label.
+function stripItemNumber(line){ const m = ITEM_RE.exec(line); return m ? m[2] : line; }
+
+function attachExercises(book){
+  const stats = { sets: 0, items: 0, answered: 0, unmatched: 0, byRule: {} };
+
+  const parts = new Map();
+  book.chapters.forEach((c, i) => {
+    const k = c.h1 || '\u0000top';
+    if(!parts.has(k)) parts.set(k, []);
+    parts.get(k).push(i);
+  });
+
+  for(const idxs of parts.values()){
+    // Answer sections are the reliably identifiable side, so they are found
+    // first and everything else is matched against them.
+    const answerGroups = [], questionChapters = [];
+    for(const ci of idxs){
+      const ch = book.chapters[ci];
+      const own = ch.own || ch.title || '';
+      if(ANS_HEADING.test(own)){
+        for(const g of collectGroups(ch, true)){
+          if(!g.items.length) continue;
+          g.chapterIdx = ci;
+          g.section = answerLabelParts(g.label);
+          g.words = sectionWords(g.section.section);
+          answerGroups.push(g);
+        }
+      } else {
+        questionChapters.push(ci);
+      }
+    }
+    if(!answerGroups.length) continue;
+
+    for(const ci of questionChapters){
+      const ch = book.chapters[ci];
+      const own = ch.own || ch.title || '';
+      const chWords = sectionWords(own);
+      // A chapter only holds questions if it announces itself as an exercise
+      // section, or its name matches an answer section's name. Without this
+      // gate an ordinary numbered list — "Important points:" under a grammar
+      // heading, a vocabulary table of the numbers 1 to 20 — becomes a set of
+      // questions and gets some other exercise's answers bolted onto it.
+      const named = answerGroups.some(a => wordsOverlap(chWords, a.words));
+      if(!EX_HEADING.test(own) && !named) continue;
+
+      for(const q of collectGroups(ch, false)){
+        if(!q.items.length) continue;
+        const qNums = q.items.map(it => it.num);
+        const qOrd = groupKey(q.ord);
+        const qLetter = q.letter;
+        const qIsEx = EX_HEADING.test(q.label) || EX_HEADING.test(own);
+
+        const candidates = [];
+        for(const a of answerGroups){
+          if(a.chapterIdx < ci) continue;              // answers come after questions
+          const nums = new Set(a.items.map(it => it.num));
+          const covered = qNums.filter(n => nums.has(n)).length;
+          const aOrd = groupKey(a.ord), aLetter = a.section.letter;
+
+          // Scheme 1: an explicit ordinal on both sides.
+          if(qOrd && aOrd === qOrd && covered >= Math.ceil(qNums.length / 2)){
+            candidates.push({ a: a, rule: 'ordinal', dist: a.chapterIdx - ci }); continue;
+          }
+          // Scheme 2: a letter on both sides, plus agreeing section names.
+          if(qLetter && aLetter === qLetter && covered === qNums.length &&
+             wordsOverlap(chWords, a.words)){
+            candidates.push({ a: a, rule: 'letter', dist: a.chapterIdx - ci }); continue;
+          }
+          // Scheme 3: no key on either side. Adjacency only, and only for a
+          // group that really is an exercise, with every number covered — and
+          // every number still UNCLAIMED. A practice test numbers its
+          // questions straight through its parts (Part A takes 1-3, Part B
+          // takes 4-6), so once a part has claimed a number no later group can
+          // have it. That is what stops a "Part D: Recognition Exercise"
+          // further down the chapter, numbered 1-5 of its own, from helping
+          // itself to the MCQ answer table that belongs to Parts A and B.
+          if(!qOrd && !qLetter && !aOrd && !aLetter && qIsEx && covered === qNums.length){
+            const claimed = a._claimed || (a._claimed = new Set());
+            if(qNums.some(n => claimed.has(n))) continue;
+            candidates.push({ a: a, rule: 'adjacent', dist: a.chapterIdx - ci }); continue;
+          }
+        }
+
+        // Ambiguity is treated as failure for the keyed rules: two plausible
+        // answer groups means the key didn't actually identify anything, and
+        // guessing is what produced confidently wrong answers before. For the
+        // un-keyed rule the nearest following group is the intended one.
+        let pick = null;
+        for(const rule of ['ordinal','letter','adjacent']){
+          const c = candidates.filter(x => x.rule === rule);
+          if(!c.length) continue;
+          if(c.length === 1 || rule === 'adjacent'){
+            c.sort((x,y) => x.dist - y.dist);
+            pick = c[0];
+          }
+          break;
+        }
+        if(!pick){ stats.unmatched += q.items.length; continue; }
+
+        if(pick.rule === 'adjacent'){
+          const claimed = pick.a._claimed || (pick.a._claimed = new Set());
+          qNums.forEach(n => claimed.add(n));
+        }
+        const ansByNum = new Map();
+        for(const it of pick.a.items) if(!ansByNum.has(it.num)) ansByNum.set(it.num, it);
+
+        const set = { title: q.label, match: pick.rule, source: pick.a.label, items: [] };
+        for(const it of q.items){
+          const entry = { n: it.num, block: it.blockIdx, from: it.segFrom, to: it.segTo,
+                          q: htmlToText(escapeHtml(it.lines.join(' '))) };
+          const ans = ansByNum.get(it.num);
+          if(ans){
+            const pay = answerPayload(ans.lines.map(stripItemNumber));
+            if(pay.text){ entry.a = pay.text; entry.aHtml = pay.html; entry.aSegs = pay.segs; stats.answered++; }
+          }
+          set.items.push(entry);
+          stats.items++;
+        }
+        stats.byRule[pick.rule] = (stats.byRule[pick.rule] || 0) + 1;
+        (ch.exercises || (ch.exercises = [])).push(set);
+        stats.sets++;
+      }
+
+      if(ch.exercises) ch.exercises.sort((x,y) =>
+        (x.items[0] ? x.items[0].block : 0) - (y.items[0] ? y.items[0].block : 0));
+    }
+  }
+  return stats;
+}
+
+// The per-line/row maps exist only for the pass above; shipping them would
+// roughly double the size of every chapter file for no reader benefit.
+function stripBuildScaffolding(book){
+  for(const ch of book.chapters){
+    for(const bl of ch.blocks){ delete bl._lines; delete bl._rows; delete bl._header; }
+    delete ch.own; delete ch.titleLines; delete ch.level; delete ch.h1;
+  }
+}
+
 // ============================== driver ==============================
 
 if(!fs.existsSync(SRC)){ console.error('Source folder not found: '+SRC); process.exit(1); }
@@ -1084,6 +1428,7 @@ const files = fs.readdirSync(SRC).filter(f => /\.mdx?$/i.test(f));
 if(!files.length){ console.error('No .md files in '+SRC); process.exit(1); }
 
 const books = files.map(f => extractBook(path.join(SRC,f)));
+books.forEach(b => { b.exStats = attachExercises(b); stripBuildScaffolding(b); });
 books.sort((a,b) => a.title.localeCompare(b.title));
 
 const usedIds = [];
@@ -1121,6 +1466,33 @@ function writeReport(){
   fs.writeFileSync(path.join(DATA,'segments-report.txt'), lines.join('\n'), 'utf8');
 }
 
+// Audit file for exercise mode: every question the reader will ask, next to
+// the answer it will read out. This is the only way to check the pairing is
+// right — a confidently wrong answer is worse than no answer at all.
+function writeExerciseReport(){
+  const lines = [];
+  books.forEach(b => {
+    if(!b.chapters.some(c => c.exercises)) return;
+    lines.push('='.repeat(78));
+    lines.push('BOOK: '+b.title+'   <- '+b.source);
+    lines.push('='.repeat(78));
+    b.chapters.forEach((c,ci) => {
+      if(!c.exercises) return;
+      lines.push('');
+      lines.push('--- CHAPTER '+(ci+1)+': '+c.title);
+      c.exercises.forEach(set => {
+        lines.push('  SET: '+set.title);
+        lines.push('       matched by: '+set.match+'   from answer group: '+(set.source||'?'));
+        set.items.forEach(it => {
+          lines.push('    Q'+it.n+'  '+it.q);
+          lines.push('      A   '+(it.a !== undefined ? it.a : '*** NO ANSWER FOUND ***'));
+        });
+      });
+    });
+  });
+  fs.writeFileSync(path.join(DATA,'exercises-report.txt'), lines.join('\n'), 'utf8');
+}
+
 (async () => {
   const passphrase = (await getPassphrase()).trim();
   if(!passphrase){ console.error('No passphrase provided (set BOOK_PASSPHRASE or type one). Aborting.'); process.exit(1); }
@@ -1145,7 +1517,7 @@ function writeReport(){
     })
   };
   fs.writeFileSync(path.join(DATA,'manifest.json'), JSON.stringify(manifest));
-  if(WANT_REPORT) writeReport();
+  if(WANT_REPORT){ writeReport(); writeExerciseReport(); }
 
   console.log('Wrote '+path.join(path.relative(process.cwd(),DATA),'manifest.json')+'  (block text encrypted)');
   books.forEach(b => {
@@ -1153,6 +1525,17 @@ function writeReport(){
     console.log('  '+b.title);
     console.log('    ['+b.id+']  '+b.chapters.length+' ch, '+s.blocks+' blocks ('+s.tables+' tables), '
       + s.segs+' segments  \u2014  '+s.fr+' FR / '+s.en+' EN   <- '+b.source);
+    const x = b.exStats;
+    if(x && x.items){
+      const pct = (100*x.answered/x.items).toFixed(1);
+      console.log('      exercises: '+x.sets+' sets, '+x.items+' questions, '
+        + x.answered+' with an answer from the book ('+pct+'%)'
+        + '  [' + Object.keys(x.byRule).map(r => r+':'+x.byRule[r]).join(' ') + ']'
+        + (x.unmatched ? '; '+x.unmatched+' question(s) left unmatched' : ''));
+    }
   });
-  if(WANT_REPORT) console.log('Wrote '+path.join(path.relative(process.cwd(),DATA),'segments-report.txt')+'  (language tagging audit)');
+  if(WANT_REPORT){
+    console.log('Wrote '+path.join(path.relative(process.cwd(),DATA),'segments-report.txt')+'  (language tagging audit)');
+    console.log('Wrote '+path.join(path.relative(process.cwd(),DATA),'exercises-report.txt')+'  (exercise pairing audit)');
+  }
 })();

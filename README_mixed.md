@@ -49,6 +49,7 @@ exists.
 | `index_mixed.html` | The reader. Single self-contained file. |
 | `test_reader.js` | Optional end-to-end playback test (needs `npm i jsdom`). |
 | `test_autochapter.js` | Optional test for continuous chapter playback. |
+| `test_exercise.js` | 26 checks for exercise mode (needs jsdom). |
 | `test_lexicon.js` | 116 checks: classifier, word lists, speech cleanup, chapter structure. |
 | `tools/verify_build.js` | Checks a whole built library for fidelity and integrity. |
 | `tools/audit_report.py` | Flags likely mis-tagged segments in a `--report` file. |
@@ -282,6 +283,69 @@ New or changed:
   a language is muted — otherwise the text looks unchanged while half of it has
   gone silent.
 
+## Exercise mode
+
+With the **Exercise** pill on, reading stops at each exercise question, takes a
+typed attempt, then shows and reads out the answer **the book itself gives**.
+The rest of the book reads exactly as before; only exercise questions
+interrupt. The answer-key sections still read normally too, as their own
+chapters.
+
+The flow: the question is read in the normal flow with its normal voices →
+playback parks and the panel opens with a text box → **Check** (or Enter) →
+your answer and the book's answer appear side by side and the book's is read
+aloud → **Next** carries on to the following question. **Skip** moves on
+without answering; **Exit exercise mode** returns to plain reading at once.
+Shift+Enter puts a newline in the box, for the longer writing tasks.
+
+**Nothing is graded.** The two answers are put side by side and you judge.
+Marking free-form French right or wrong would be guesswork dressed up as
+authority, and these answer keys routinely print several acceptable forms
+separated by "/". The only thing the panel asserts is when your text is
+*identical* to the book's.
+
+### How questions find their answers
+
+Questions and answers are never next to each other — questions sit in an
+exercise section, answers in a separate key that this builder has already
+turned into a different chapter. They are matched at build time on an explicit
+key that both sides carry, and **only when exactly one candidate fits**.
+Ambiguity is treated as failure, because a confidently wrong answer is far
+worse than no answer. An early version of this pass paired a
+vocabulary-matching exercise with the answers to a true/false comprehension
+quiz — every answer plausible, every answer wrong.
+
+Your books use three schemes, all supported:
+
+| Scheme | Questions | Answers |
+|---|---|---|
+| Ordinal | `### Drill 2: Translation Sprint` / `### Exercice 1 : Complétez…` | `### Drill 2 Answers` / `**Exercice 1 :**` |
+| Letter + section | `## Exercices de vocabulaire` → `### A. Associez les mots…` | `## Les réponses` → `### Vocabulaire A — Associez` |
+| Neither (adjacency) | `## 📝 Mini TEF Practice Test` → `**1.** Quel temps…` | `## 📋 Answer Key & Explanations` → `| 1 | B | … |` |
+
+Matching never crosses a `#` boundary — every chapter of every one of these
+books has an "Exercice 1". For the un-keyed third scheme the bar is higher:
+the group must announce itself as an exercise, the key must be the nearest
+un-keyed one after it, every question number must be covered, and numbers are
+claimed exclusively (a practice test numbers straight through its parts, so
+Part A takes 1–3 and Part B takes 4–6; a later "Part D" numbered 1–5 of its
+own therefore can't help itself to that table).
+
+Where no answer can be matched, the question is still asked and your attempt
+still recorded — the panel just says the book doesn't print one.
+
+**Check the pairing before trusting it.** `--report` also writes
+`exercises-report.txt`: every question the reader will ask, the answer it will
+read, and which rule and which answer group it came from.
+
+### Results on your nine books
+
+595 exercise sets, 3,820 questions, all but 4 with an answer from the book.
+322 sets matched by ordinal, 180 by letter, 93 by adjacency. A further ~750
+questions were found but left unmatched rather than guessed. An automated
+conflict check — two exercises drawing on the same answer group with
+overlapping numbers, where at most one can be right — reports **0 conflicts**.
+
 ## Notes on the other book formats
 
 The nine books in this set use three different shapes, and all of them work,
@@ -340,6 +404,11 @@ which the current approach can't tell. About 75 segments in 150,000.
   signals, mixed narrative, headings, vocabulary tables, word-list hygiene,
   citation splitting, speech cleanup, bilingual heading pairs, part dividers,
   art blocks, and span/segment alignment.
+- **Exercise mode** (`node test_exercise.js`, 26 checks, all passing): reads
+  the question, stops, refuses to reveal the answer early, ignores Space while
+  you type, shows typed vs book answer, reads the book's answer aloud,
+  advances on Next, Skip works without an answer, and switching the mode off
+  mid-exercise returns to ordinary reading.
 - **Nine books, three formats** (`node tools/verify_build.js`): the five
   Langue Café / graded readers and the four TEF grammar books all build with
   **0 integrity problems and 100% display fidelity** (49,461 displayed lines),
