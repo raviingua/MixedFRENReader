@@ -39,6 +39,12 @@
   :root[data-theme="light"]{
     --bg:#f4f3f0; --panel:#ffffff; --line:#dedcd6; --dim:#767a82; --text:#17181c;
   }
+  :root{
+    /* The reading size and face, in one place, so the exercise panel can use
+       exactly the same ones as the page behind it. T+/T- drive --mainScale. */
+    --readSize:calc(clamp(19px,4.6vw,32px) * var(--mainScale,1));
+    --readFont:"Linux Libertine","Libertinus Serif",Georgia,serif;
+  }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
   body{position:fixed;inset:0;background:var(--bg);color:var(--text);
@@ -140,8 +146,8 @@
   /* The reading block. There is exactly one per screen — the whole paragraph,
      dialogue, heading or table as written in the source, with both languages
      left interleaved inside it. */
-  .mixBlock{font-family:"Linux Libertine","Libertinus Serif",Georgia,serif;
-    font-size:calc(clamp(19px,4.6vw,32px) * var(--mainScale,1));line-height:1.55;text-align:left;
+  .mixBlock{font-family:var(--readFont);
+    font-size:var(--readSize);line-height:1.55;text-align:left;
     font-style:normal}
   /* In-content sub-headings (source ###–######); levels get progressively
      less shouty, since level 4+ is used for short call-outs ("Attention !"). */
@@ -201,12 +207,18 @@
     max-height:72%;overflow-y:auto;color:var(--text)}
   .exPanel.on{display:flex}
   .exTag{font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--accent);font-weight:700}
-  .exQ{font-size:15px;line-height:1.45;font-weight:600}
+  /* The question and the book's answer ARE book text, so they are set in the
+     reading face at the reading size — at 15px they were markedly smaller
+     than the page they came from, which made checking an answer feel like
+     reading a footnote. The typed answer stays in the UI face: it is your
+     text, not the book's. The panel scrolls, so a large text size costs
+     scrolling rather than clipping. */
+  .exQ{font-size:var(--readSize);line-height:1.45;font-weight:600;font-family:var(--readFont)}
   .exQ .exNum{color:var(--dim);font-weight:700;margin-right:5px}
   .exRow{display:flex;gap:8px;align-items:stretch}
-  .exPanel textarea{flex:1;min-height:44px;max-height:120px;resize:vertical;
+  .exPanel textarea{flex:1;min-height:2.4em;max-height:6em;resize:vertical;
     background:var(--bg);border:1px solid var(--line);border-radius:10px;
-    color:var(--text);padding:10px;font-size:15px;font-family:inherit;line-height:1.35}
+    color:var(--text);padding:10px;font-size:var(--readSize);font-family:inherit;line-height:1.35}
   .exPanel textarea:focus{outline:none;border-color:var(--accent)}
   .exBtn{padding:10px 15px;border-radius:10px;background:var(--accent);color:#fff;
     font-weight:600;font-size:14px;white-space:nowrap}
@@ -215,7 +227,8 @@
   .exCompare{display:flex;flex-direction:column;gap:8px}
   .exCard{border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:var(--bg)}
   .exCard h4{font-size:10px;letter-spacing:.7px;text-transform:uppercase;color:var(--dim);font-weight:700;margin-bottom:4px}
-  .exCard .body{font-size:15px;line-height:1.45;white-space:pre-wrap}
+  .exCard .body{font-size:var(--readSize);line-height:1.45;white-space:pre-wrap}
+  .exCard.book .body{font-family:var(--readFont)}
   .exCard.book{border-color:var(--accent)}
   .exCard.empty .body{color:var(--dim);font-style:italic}
   .exSame{font-size:11.5px;color:var(--dim)}
@@ -223,7 +236,6 @@
   .exProgress{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;margin-left:auto}
   @media (max-width:420px){
     .exPanel{padding:10px 11px 12px;max-height:80%}
-    .exQ{font-size:14px}
   }
 
   /* ===== whole-chapter view =====
