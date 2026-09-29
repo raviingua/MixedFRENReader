@@ -148,8 +148,14 @@
  * ---------------------------------------------------------------------------
  * ENCRYPTION
  * ---------------------------------------------------------------------------
- * Unchanged from the other two builders: AES-256-GCM, key derived from a
- * passphrase via PBKDF2-SHA-256, so the public repo holds only ciphertext.
+ * AES-256-GCM, key derived from a passphrase via PBKDF2-SHA-256, so the public
+ * repo holds only ciphertext.
+ *
+ * If <dataDir>/manifest.json already exists, its salt and PBKDF2 settings are
+ * REUSED (read before the folder is cleared), so the same passphrase keeps
+ * deriving the same key across rebuilds. With no manifest, a new random salt
+ * is generated. The passphrase is never stored. Every encrypted book still
+ * gets a fresh random AES-GCM IV.
  * The reader asks for the passphrase once and decrypts in the browser.
  *   (PowerShell)  $env:BOOK_PASSPHRASE="your secret"; node build_books_mixed.js .\books-src\ .
  * Book and chapter TITLES stay in clear so the picker works before you type
@@ -1496,9 +1502,50 @@ function writeExerciseReport(){
 (async () => {
   const passphrase = (await getPassphrase()).trim();
   if(!passphrase){ console.error('No passphrase provided (set BOOK_PASSPHRASE or type one). Aborting.'); process.exit(1); }
-  const salt = crypto.randomBytes(16);
-  const key = crypto.pbkdf2Sync(passphrase, salt, PBKDF2_ITER, 32, 'sha256');
 
+  // Read any existing manifest BEFORE the data folder is wiped, and reuse its
+  // key-derivation settings (salt + PBKDF2 params). Same passphrase + same
+  // salt + same settings = same AES key across builds. The passphrase itself
+  // is never stored. Each book still gets a fresh random AES-GCM IV.
+  const oldManifestPath = path.join(DATA, 'manifest.json');
+  let oldCrypto = null;
+  if(fs.existsSync(oldManifestPath)){
+    console.log('Existing manifest.json found \u2014 reusing its encryption settings.');
+    try{
+      const oldManifest = JSON.parse(fs.readFileSync(oldManifestPath, 'utf8'));
+      if(!oldManifest.crypto || !oldManifest.crypto.salt){
+        throw new Error('manifest.json does not contain valid crypto settings.');
+      }
+      oldCrypto = oldManifest.crypto;
+    }catch(err){
+      console.error('Could not reuse existing manifest.json: ' + err.message);
+      process.exit(1);
+    }
+  }else{
+    console.log('No existing manifest.json found \u2014 generating new encryption settings.');
+  }
+
+  const cryptoConfig = oldCrypto || {
+    alg:'AES-GCM', kdf:'PBKDF2', hash:'SHA-256', iter:PBKDF2_ITER,
+    salt: crypto.randomBytes(16).toString('base64')
+  };
+
+  if(cryptoConfig.alg !== 'AES-GCM' || cryptoConfig.kdf !== 'PBKDF2' ||
+     cryptoConfig.hash !== 'SHA-256' || !Number.isInteger(cryptoConfig.iter) ||
+     cryptoConfig.iter <= 0 || typeof cryptoConfig.salt !== 'string'){
+    console.error('Unsupported or invalid crypto settings in manifest.json.');
+    process.exit(1);
+  }
+
+  const salt = Buffer.from(cryptoConfig.salt, 'base64');
+  if(salt.length !== 16){
+    console.error('Invalid encryption salt in manifest.json: expected 16 bytes.');
+    process.exit(1);
+  }
+
+  const key = crypto.pbkdf2Sync(passphrase, salt, cryptoConfig.iter, 32, 'sha256');
+
+  // Safe to rebuild now: the old crypto settings have been captured.
   fs.rmSync(DATA, { recursive:true, force:true });
   fs.mkdirSync(DATA, { recursive:true });
 
@@ -1506,7 +1553,7 @@ function writeExerciseReport(){
     // Key-derivation params are public (the salt is not a secret). Book and
     // chapter TITLES stay in clear so the picker works before the passphrase
     // is typed; the block text and its language tags are encrypted.
-    crypto: { alg:'AES-GCM', kdf:'PBKDF2', hash:'SHA-256', iter:PBKDF2_ITER, salt: salt.toString('base64') },
+    crypto: cryptoConfig,
     mixed: true,
     books: books.map(b => {
       const rel = DATA_NAME + '/' + b.id + '.enc';
